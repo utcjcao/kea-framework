@@ -19,6 +19,9 @@ add_library(kea_framework
   src/detail/logistic_regression_helpers.cc
   src/detail/proxy_training_helpers.cc
   src/detail/training_data_access.cc
+  src/distributed/duckdb_shard_worker.cc
+  src/distributed/in_process_execution_backend.cc
+  src/distributed/run_config.cc
   src/function_labeler.cc
   src/logistic_regression_trainer.cc
   src/proxy_training_runner.cc
@@ -60,4 +63,12 @@ if(KEA_FRAMEWORK_BUILD_TESTS)
   target_link_libraries(proxy_training_runner_test PRIVATE kea_framework)
   add_test(NAME proxy_training_runner_test
            COMMAND proxy_training_runner_test)
+
+  add_executable(distributed_foundation_test
+    tests/distributed_foundation_test.cc
+  )
+  target_link_libraries(distributed_foundation_test PRIVATE kea_framework)
+  target_include_directories(distributed_foundation_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME distributed_foundation_test
+           COMMAND distributed_foundation_test)
 endif()

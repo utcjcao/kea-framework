@@ -11,6 +11,8 @@ class Connection;
 
 namespace kea {
 
+struct RunConfig;
+
 // Row IDs are kept independent of a DuckDB row position so that selections
 // remain meaningful if storage changes later.
 using RowId = std::string;
@@ -24,16 +26,6 @@ struct TrainingDataset {
   std::string id_column = "id";
   std::string text_column = "text";
   std::string embedding_column = "embedding";
-};
-
-// `rounds` is the total number of train operations.  One round means initial
-// sampling, labeling, and training only.  Later rounds add uncertainty-picked
-// rows and retrain on every labeled example accumulated so far.
-struct TrainingConfig {
-  std::size_t rounds = 1;
-  std::size_t initial_batch_size = 50;
-  std::size_t batch_size_per_round = 50;
-  std::uint64_t seed = 42;
 };
 
 struct Candidate {
@@ -53,10 +45,6 @@ struct ProxyModel {
   float intercept = 0.0F;
 
   [[nodiscard]] float PredictProbability(const Embedding& embedding) const;
-};
-
-struct TrainingResult {
-  ProxyModel final_model;
 };
 
 // Logistic-regression settings for the MVP. They are constructor options
@@ -125,16 +113,16 @@ class LogisticRegressionTrainer {
   LogisticRegressionOptions options_;
 };
 
-// Owns the complete single-machine lifecycle:
-// initial sample -> label -> train -> recursive uncertainty sample -> retrain.
-// The DuckDB connection must outlive the runner.
+// Owns the complete training lifecycle: initial sampling -> label -> train ->
+// recursive uncertainty sampling -> retrain. The caller supplies extensible
+// sampling and labeling components; deployment configuration comes from
+// RunConfig. The DuckDB connection must outlive the runner.
 class ProxyTrainingRunner {
  public:
   explicit ProxyTrainingRunner(duckdb::Connection& connection);
 
-  [[nodiscard]] TrainingResult Run(
-      const TrainingDataset& dataset,
-      const TrainingConfig& config,
+  [[nodiscard]] ProxyModel Run(
+      const RunConfig& config,
       ISampler& sampler,
       ILabeler& labeler);
 

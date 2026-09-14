@@ -8,18 +8,6 @@
 
 namespace kea::detail {
 
-void ValidateTrainingConfig(const TrainingConfig& config) {
-  if (config.rounds == 0) {
-    throw std::invalid_argument("TrainingConfig.rounds must be at least one");
-  }
-  if (config.initial_batch_size == 0) {
-    throw std::invalid_argument("TrainingConfig.initial_batch_size must be positive");
-  }
-  if (config.rounds > 1 && config.batch_size_per_round == 0) {
-    throw std::invalid_argument("TrainingConfig.batch_size_per_round must be positive");
-  }
-}
-
 void ValidateSelectedIds(const std::vector<RowId>& ids, std::size_t budget) {
   if (ids.empty()) {
     throw std::runtime_error("Sampler selected no initial candidates");

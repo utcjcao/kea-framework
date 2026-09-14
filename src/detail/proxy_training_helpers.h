@@ -7,8 +7,6 @@
 
 namespace kea::detail {
 
-void ValidateTrainingConfig(const TrainingConfig& config);
-
 void ValidateSelectedIds(
     const std::vector<RowId>& ids,
     std::size_t budget);

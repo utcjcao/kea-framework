@@ -2,6 +2,7 @@
 #include "kea/proxy_training.h"
 #include "kea/samplers/cluster_sampler.h"
 #include "kea/samplers/random_sampler.h"
+#include "kea/run_config.h"
 
 #include <cassert>
 #include <string>
@@ -60,38 +61,37 @@ int main() {
   duckdb::Connection connection(database);
   CreateTestDataset(connection);
 
-  kea::TrainingDataset dataset;
-  dataset.table_name = "examples";
   kea::RandomSampler sampler;
   kea::ProxyTrainingRunner runner(connection);
 
   std::vector<kea::RowId> one_round_ids;
   auto one_round_labeler = MakeOracleLabeler(&one_round_ids);
-  kea::TrainingConfig one_round_config;
+  kea::RunConfig one_round_config;
+  one_round_config.dataset.table_name = "examples";
   one_round_config.rounds = 1;
-  one_round_config.initial_batch_size = 6;
-  one_round_config.batch_size_per_round = 2;
+  one_round_config.label_budget = 6;
   one_round_config.seed = 42;
-  const kea::TrainingResult one_round_result =
-      runner.Run(dataset, one_round_config, sampler, one_round_labeler);
+  const kea::ProxyModel one_round_model =
+      runner.Run(one_round_config, sampler, one_round_labeler);
   assert(one_round_ids.size() == 6);
   assert(std::unordered_set<kea::RowId>(one_round_ids.begin(), one_round_ids.end()).size() == 6);
-  assert(one_round_result.final_model.PredictProbability({-4.0F}) < 0.5F);
-  assert(one_round_result.final_model.PredictProbability({4.0F}) > 0.5F);
+  assert(one_round_model.PredictProbability({-4.0F}) < 0.5F);
+  assert(one_round_model.PredictProbability({4.0F}) > 0.5F);
 
   std::vector<kea::RowId> recursive_ids;
   auto recursive_labeler = MakeOracleLabeler(&recursive_ids);
-  kea::TrainingConfig recursive_config;
+  kea::RunConfig recursive_config;
+  recursive_config.dataset.table_name = "examples";
   recursive_config.rounds = 3;
-  recursive_config.initial_batch_size = 6;
-  recursive_config.batch_size_per_round = 2;
+  recursive_config.label_budget = 10;
+  recursive_config.initial_label_fraction = 0.6;
   recursive_config.seed = 42;
-  const kea::TrainingResult recursive_result =
-      runner.Run(dataset, recursive_config, sampler, recursive_labeler);
+  const kea::ProxyModel recursive_model =
+      runner.Run(recursive_config, sampler, recursive_labeler);
   assert(recursive_ids.size() == 10);
   assert(std::unordered_set<kea::RowId>(recursive_ids.begin(), recursive_ids.end()).size() == 10);
-  assert(recursive_result.final_model.PredictProbability({-4.0F}) < 0.5F);
-  assert(recursive_result.final_model.PredictProbability({4.0F}) > 0.5F);
+  assert(recursive_model.PredictProbability({-4.0F}) < 0.5F);
+  assert(recursive_model.PredictProbability({4.0F}) > 0.5F);
 
   std::vector<kea::RowId> cluster_ids;
   auto cluster_labeler = MakeOracleLabeler(&cluster_ids);
@@ -99,13 +99,14 @@ int main() {
   cluster_options.cluster_count = 2;
   cluster_options.max_iterations = 20;
   kea::ClusterSampler cluster_sampler(cluster_options);
-  kea::TrainingConfig cluster_config;
+  kea::RunConfig cluster_config;
+  cluster_config.dataset.table_name = "examples";
   cluster_config.rounds = 1;
-  cluster_config.initial_batch_size = 2;
+  cluster_config.label_budget = 2;
   cluster_config.seed = 42;
-  const kea::TrainingResult cluster_result =
-      runner.Run(dataset, cluster_config, cluster_sampler, cluster_labeler);
+  const kea::ProxyModel cluster_model =
+      runner.Run(cluster_config, cluster_sampler, cluster_labeler);
   assert(cluster_ids.size() == 2);
-  assert(cluster_result.final_model.PredictProbability({-4.0F}) < 0.5F);
-  assert(cluster_result.final_model.PredictProbability({4.0F}) > 0.5F);
+  assert(cluster_model.PredictProbability({-4.0F}) < 0.5F);
+  assert(cluster_model.PredictProbability({4.0F}) > 0.5F);
 }
