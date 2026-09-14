@@ -44,6 +44,12 @@ classDiagram
         +direct calls to one local worker
     }
 
+    class InProcessMultiShardBackend {
+        <<internal test backend>>
+        +direct calls to independent local shards
+        +splits global round budgets
+    }
+
     class DuckDbShardWorker {
         <<internal>>
         +local sampling and labeling
@@ -78,6 +84,8 @@ classDiagram
 
     SingleMachineBackend ..|> ITrainingExecutionBackend
     SingleMachineBackend --> DuckDbShardWorker : direct call
+    InProcessMultiShardBackend ..|> ITrainingExecutionBackend
+    InProcessMultiShardBackend --> DuckDbShardWorker : direct calls to many workers
     DuckDbShardWorker --> DuckDB : reads and tracks IDs
 
     DistributedBackend ..|> ITrainingExecutionBackend
@@ -90,3 +98,9 @@ single-machine mode it creates an internal `DuckDbShardWorker`, wraps it in
 `SingleMachineBackend`, and routes initial and uncertainty-label acquisition
 through `ITrainingExecutionBackend`. The missing piece is a real distributed
 backend that sends the same requests to multiple remote shard workers.
+
+`InProcessMultiShardBackend` is the transport-independent correctness harness:
+it runs multiple independent DuckDB shards in one process, divides every
+global label budget across them, pools clean labels centrally, and broadcasts
+the model after every round. This implements and tests LC1 behavior without
+selecting a network communication framework.

@@ -106,8 +106,12 @@ The remaining strategies are intentionally not implemented yet:
 - `cluster_local`, `cluster_local_full`, `federated_sample`, `federated`, and
   `lc1rec` through `lc4rec` require multiple real shards. They depend on
   worker dispatch/RPC, shard-local data ownership, and—in federated modes—
-  exchanging and aggregating independently trained model weights. A threaded
-  single-machine imitation would not establish those future contracts.
+  exchanging and aggregating independently trained model weights.
+
+There is an internal in-process multi-shard LC1 correctness test: independent
+DuckDB shards perform local cluster-representative sampling, their clean labels
+are pooled for central training, and the resulting model is broadcast after
+each round. It is not a networked distributed runtime.
 
 For this MVP, the configured DuckDB table must provide a `VARCHAR` ID column,
 a `VARCHAR` text column, and a `FLOAT[]` embedding column. `FunctionLabeler`
