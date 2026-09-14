@@ -28,10 +28,15 @@ LabeledExampleBatch LabelAndRecord(
 }  // namespace
 
 DuckDbShardWorker::DuckDbShardWorker(
+    ShardId id,
     duckdb::Connection& connection,
     ISampler& sampler,
     ILabeler& labeler)
-    : connection_(connection), sampler_(sampler), labeler_(labeler) {}
+    : connection_(connection), id_(std::move(id)), sampler_(sampler), labeler_(labeler) {
+  if (id_.empty()) {
+    throw std::invalid_argument("DuckDB shard worker requires a non-empty ID");
+  }
+}
 
 DuckDbShardWorker::~DuckDbShardWorker() {
   try {
@@ -42,7 +47,7 @@ DuckDbShardWorker::~DuckDbShardWorker() {
 }
 
 ShardId DuckDbShardWorker::Id() const {
-  return "local";
+  return id_;
 }
 
 LabeledExampleBatch DuckDbShardWorker::AcquireInitialLabels(
@@ -50,11 +55,16 @@ LabeledExampleBatch DuckDbShardWorker::AcquireInitialLabels(
   kea::detail::DropLabeledIdsTable(connection_);
   kea::detail::CreateLabeledIdsTable(connection_);
   try {
+    if (request.label_budget == 0) {
+      return {Id(), {}};
+    }
     kea::detail::DuckDbInitialSamplingContext sampling_context(connection_, request.dataset);
     const std::vector<RowId> ids = sampler_.SelectInitial(
         sampling_context, request.label_budget, request.seed);
     kea::detail::ValidateSelectedIds(ids, request.label_budget);
-    return LabelAndRecord(connection_, request.dataset, labeler_, ids);
+    auto batch = LabelAndRecord(connection_, request.dataset, labeler_, ids);
+    batch.shard_id = Id();
+    return batch;
   } catch (...) {
     kea::detail::DropLabeledIdsTable(connection_);
     throw;
@@ -70,7 +80,9 @@ LabeledExampleBatch DuckDbShardWorker::AcquireUncertainLabels(
   if (ids.empty()) {
     return {Id(), {}};
   }
-  return LabelAndRecord(connection_, request.dataset, labeler_, ids);
+  auto batch = LabelAndRecord(connection_, request.dataset, labeler_, ids);
+  batch.shard_id = Id();
+  return batch;
 }
 
 LocalModelResult DuckDbShardWorker::TrainLocalModel(const LocalTrainingRequest&) {

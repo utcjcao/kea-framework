@@ -48,4 +48,21 @@ class SingleMachineBackend final : public ITrainingExecutionBackend {
   std::shared_ptr<IShardWorker> worker_;
 };
 
+// Test/development backend for exercising coordinator logic with independent
+// shard workers before a network transport is chosen.
+class InProcessMultiShardBackend final : public ITrainingExecutionBackend {
+ public:
+  explicit InProcessMultiShardBackend(std::vector<std::shared_ptr<IShardWorker>> workers);
+  [[nodiscard]] std::vector<LabeledExampleBatch> AcquireInitialLabels(
+      const InitialSamplingRequest& request) override;
+  [[nodiscard]] std::vector<LabeledExampleBatch> AcquireUncertainLabels(
+      const RecursiveSamplingRequest& request) override;
+  [[nodiscard]] std::vector<LocalModelResult> TrainLocalModels(
+      const LocalTrainingRequest& request) override;
+  void BroadcastModel(const ModelBroadcast& broadcast) override;
+
+ private:
+  std::vector<std::shared_ptr<IShardWorker>> workers_;
+};
+
 }  // namespace kea::distributed

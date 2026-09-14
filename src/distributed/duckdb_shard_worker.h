@@ -17,7 +17,8 @@ namespace kea::distributed::detail {
 // callers interact with the runner, sampler, labeler, and RunConfig instead.
 class DuckDbShardWorker final : public IShardWorker {
  public:
-  DuckDbShardWorker(duckdb::Connection& connection, ISampler& sampler, ILabeler& labeler);
+  DuckDbShardWorker(
+      ShardId id, duckdb::Connection& connection, ISampler& sampler, ILabeler& labeler);
   ~DuckDbShardWorker() override;
 
   [[nodiscard]] ShardId Id() const override;
@@ -31,6 +32,7 @@ class DuckDbShardWorker final : public IShardWorker {
 
  private:
   duckdb::Connection& connection_;
+  ShardId id_;
   ISampler& sampler_;
   ILabeler& labeler_;
 };

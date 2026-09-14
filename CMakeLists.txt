@@ -22,6 +22,7 @@ add_library(kea_framework
   src/distributed/duckdb_shard_worker.cc
   src/distributed/in_process_execution_backend.cc
   src/distributed/run_config.cc
+  src/distributed/training_execution.cc
   src/function_labeler.cc
   src/logistic_regression_trainer.cc
   src/proxy_training_runner.cc
