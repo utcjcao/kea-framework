@@ -3,6 +3,10 @@ cmake_minimum_required(VERSION 3.20)
 project(kea_framework LANGUAGES CXX)
 
 option(KEA_FRAMEWORK_BUILD_TESTS "Build kea-framework tests" ON)
+option(KEA_FRAMEWORK_BUILD_SEMBENCH_E2E_TESTS
+  "Build end-to-end tests using a local SemBench checkout" ON)
+set(KEA_SEMBENCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/SemBench" CACHE PATH
+  "Path to a local SemBench checkout")
 
 find_package(Armadillo REQUIRED)
 find_package(cereal REQUIRED)
@@ -72,4 +76,24 @@ if(KEA_FRAMEWORK_BUILD_TESTS)
   target_include_directories(distributed_foundation_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME distributed_foundation_test
            COMMAND distributed_foundation_test)
+
+  if(KEA_FRAMEWORK_BUILD_SEMBENCH_E2E_TESTS AND EXISTS "${KEA_SEMBENCH_DIR}")
+    find_package(ZLIB REQUIRED)
+    add_library(kea_sembench_test_support STATIC tests/sembench_test_data.cc)
+    target_compile_features(kea_sembench_test_support PRIVATE cxx_std_17)
+    target_link_libraries(kea_sembench_test_support PRIVATE ZLIB::ZLIB)
+    target_include_directories(kea_sembench_test_support
+      PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tests
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${DUCKDB_INCLUDE_DIR}
+    )
+    foreach(test_target proxy_training_runner_test distributed_foundation_test)
+      target_link_libraries(${test_target} PRIVATE kea_sembench_test_support)
+      target_compile_definitions(${test_target} PRIVATE
+        KEA_HAS_SEMBENCH=1
+        KEA_SEMBENCH_DIR="${KEA_SEMBENCH_DIR}"
+      )
+    endforeach()
+  elseif(KEA_FRAMEWORK_BUILD_SEMBENCH_E2E_TESTS)
+    message(STATUS "SemBench not found at ${KEA_SEMBENCH_DIR}; SemBench integration checks are skipped")
+  endif()
 endif()

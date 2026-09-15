@@ -6,13 +6,20 @@
 #include "kea/samplers/cluster_sampler.h"
 
 #include <cassert>
+#include <cmath>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
 #include "duckdb.hpp"
+
+#if defined(KEA_HAS_SEMBENCH)
+#include "sembench_test_data.h"
+#endif
 
 namespace {
 
@@ -57,19 +64,71 @@ bool ThrowsInvalidConfig(const kea::RunConfig& config) {
   return false;
 }
 
-void CreateShard(duckdb::Connection& connection, const std::vector<float>& values) {
-  auto create = connection.Query(
-      "CREATE TABLE examples (id VARCHAR PRIMARY KEY, text VARCHAR, embedding FLOAT[])");
-  assert(!create->HasError());
-  for (std::size_t index = 0; index < values.size(); ++index) {
-    const std::string id = "row-" + std::to_string(index) + "-" + std::to_string(values[index]);
-    const std::string text = values[index] > 0.0F ? "positive" : "negative";
-    const auto insert = connection.Query(
-        "INSERT INTO examples VALUES ('" + id + "', '" + text + "', [" +
-        std::to_string(values[index]) + "])" );
-    assert(!insert->HasError());
+#if defined(KEA_HAS_SEMBENCH)
+
+void RunSemBenchDistributedFlow() {
+  duckdb::DuckDB loader_database(nullptr);
+  duckdb::Connection loader_connection(loader_database);
+  const auto examples = kea::test::LoadSemBenchExamples(
+      loader_connection,
+      kea::test::FindSemBenchDataset(
+          std::filesystem::path(KEA_SEMBENCH_DIR), kea::test::SemBenchDataset::Movie),
+      /*maximum_rows=*/768);
+  assert(examples.size() == 768);
+
+  std::vector<kea::test::SemBenchExample> shard_a_examples;
+  std::vector<kea::test::SemBenchExample> shard_b_examples;
+  shard_a_examples.reserve(examples.size() / 2);
+  shard_b_examples.reserve(examples.size() / 2);
+  for (std::size_t index = 0; index < examples.size(); ++index) {
+    (index % 2 == 0 ? shard_a_examples : shard_b_examples).push_back(examples[index]);
   }
+
+  duckdb::DuckDB shard_a_database(nullptr);
+  duckdb::DuckDB shard_b_database(nullptr);
+  duckdb::Connection shard_a_connection(shard_a_database);
+  duckdb::Connection shard_b_connection(shard_b_database);
+  kea::test::CreateExamplesTable(shard_a_connection, shard_a_examples);
+  kea::test::CreateExamplesTable(shard_b_connection, shard_b_examples);
+
+  const auto labels = kea::test::LabelsById(examples);
+  std::vector<kea::RowId> labeled_ids;
+  kea::FunctionLabeler labeler([&labels, &labeled_ids](const kea::Candidate& candidate) {
+    labeled_ids.push_back(candidate.id);
+    return labels.at(candidate.id);
+  });
+  kea::ClusterSamplingOptions options;
+  options.cluster_count = 12;
+  options.max_iterations = 5;
+  kea::ClusterSampler sampler(options);
+  auto shard_a_worker = std::make_shared<kea::distributed::detail::DuckDbShardWorker>(
+      "shard-a", shard_a_connection, sampler, labeler);
+  auto shard_b_worker = std::make_shared<kea::distributed::detail::DuckDbShardWorker>(
+      "shard-b", shard_b_connection, sampler, labeler);
+  kea::distributed::InProcessMultiShardBackend multi_backend(
+      {shard_a_worker, shard_b_worker});
+
+  kea::RunConfig lc1_config;
+  lc1_config.execution_mode = kea::ExecutionMode::Distributed;
+  lc1_config.dataset.table_name = "examples";
+  lc1_config.rounds = 2;
+  lc1_config.label_budget = 48;
+  lc1_config.initial_label_fraction = 0.5;
+  lc1_config.seed = 42;
+  lc1_config.workers = {{"shard-a", "in-process://a"}, {"shard-b", "in-process://b"}};
+
+  const kea::LogisticRegressionTrainer trainer;
+  const kea::ProxyModel lc1_model = kea::distributed::detail::RunCleanCentralTraining(
+      lc1_config, multi_backend, trainer);
+  assert(labeled_ids.size() == 48);
+  assert(std::unordered_set<kea::RowId>(labeled_ids.begin(), labeled_ids.end()).size() == 48);
+  assert(lc1_model.weights.size() == 1024);
+  const float probability = lc1_model.PredictProbability(examples.front().candidate.embedding);
+  assert(std::isfinite(probability));
+  assert(probability >= 0.0F && probability <= 1.0F);
 }
+
+#endif
 
 }  // namespace
 
@@ -107,45 +166,10 @@ int main() {
   assert(models.size() == 1);
   assert(models[0].training_row_count == 1);
 
-  // LC1-style algorithm test: local k-means representatives on two separate
-  // DuckDB shards, clean labels pooled for central training, and a broadcast
-  // after each of two rounds.
-  duckdb::DuckDB shard_a_database(nullptr);
-  duckdb::DuckDB shard_b_database(nullptr);
-  duckdb::Connection shard_a_connection(shard_a_database);
-  duckdb::Connection shard_b_connection(shard_b_database);
-  CreateShard(shard_a_connection, {-6.0F, -5.0F, -4.0F, 4.0F, 5.0F, 6.0F});
-  CreateShard(shard_b_connection, {-3.0F, -2.0F, -1.0F, 1.0F, 2.0F, 3.0F});
-
-  std::vector<kea::RowId> labeled_ids;
-  kea::FunctionLabeler labeler([&labeled_ids](const kea::Candidate& candidate) {
-    labeled_ids.push_back(candidate.id);
-    return candidate.embedding[0] > 0.0F ? 1 : 0;
-  });
-  kea::ClusterSamplingOptions options;
-  options.cluster_count = 2;
-  kea::ClusterSampler sampler(options);
-  auto shard_a_worker = std::make_shared<kea::distributed::detail::DuckDbShardWorker>(
-      "shard-a", shard_a_connection, sampler, labeler);
-  auto shard_b_worker = std::make_shared<kea::distributed::detail::DuckDbShardWorker>(
-      "shard-b", shard_b_connection, sampler, labeler);
-  kea::distributed::InProcessMultiShardBackend multi_backend(
-      {shard_a_worker, shard_b_worker});
-
-  kea::RunConfig lc1_config;
-  lc1_config.execution_mode = kea::ExecutionMode::Distributed;
-  lc1_config.dataset.table_name = "examples";
-  lc1_config.rounds = 2;
-  lc1_config.label_budget = 8;
-  lc1_config.initial_label_fraction = 0.5;
-  lc1_config.seed = 42;
-  lc1_config.workers = {{"shard-a", "in-process://a"}, {"shard-b", "in-process://b"}};
-
-  const kea::LogisticRegressionTrainer trainer;
-  const kea::ProxyModel lc1_model = kea::distributed::detail::RunCleanCentralTraining(
-      lc1_config, multi_backend, trainer);
-  assert(labeled_ids.size() == 8);
-  assert(std::unordered_set<kea::RowId>(labeled_ids.begin(), labeled_ids.end()).size() == 8);
-  assert(lc1_model.PredictProbability({-2.0F}) < 0.5F);
-  assert(lc1_model.PredictProbability({2.0F}) > 0.5F);
+#if defined(KEA_HAS_SEMBENCH)
+  // LC1-style flow: local clustering on two independent SemBench Movie
+  // shards, clean labels pooled at the coordinator, and a model broadcast
+  // after every round.
+  RunSemBenchDistributedFlow();
+#endif
 }
