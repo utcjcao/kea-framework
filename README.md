@@ -56,6 +56,12 @@ cluster_options.max_iterations = 20;
 kea::ClusterSampler sampler(cluster_options);
 ```
 
+For recursive cluster runs, set `cluster_count` to the total label budget.
+Kea clusters at that granularity, then labels only the round-0 quota of the
+representatives. For example, a 1,000-label run with a 10% initial fraction
+forms 1,000 clusters and labels a deterministic subset of 100 representatives
+in round 0.
+
 The combinations map to the supported strategies as follows:
 
 | Initial sampler | `rounds` | Behavior |
@@ -80,7 +86,7 @@ unit test is in `tests/logistic_regression_trainer_test.cc`.
 
 `ProxyTrainingRunner` implements the complete single-machine MVP flow:
 initial sampling, labeling, training, recursive uncertainty sampling, and
-retraining. It returns the final `ProxyModel` directly. The in-memory DuckDB
+retraining. It returns the final `ProxyModel` directly. The SemBench-backed
 end-to-end test is in `tests/proxy_training_runner_test.cc`. Samplers request
 operations through a framework-created sampling context; only the internal
 DuckDB data-access layer constructs SQL.

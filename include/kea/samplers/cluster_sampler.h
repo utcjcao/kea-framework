@@ -4,9 +4,10 @@
 
 namespace kea {
 
-// Centralized k-means initial sampling. One candidate nearest each cluster
-// centroid is selected and later rounds remain framework-owned uncertainty
-// sampling.
+// Centralized k-means initial sampling. K-means produces one candidate per
+// configured cluster; if the round-0 label quota is smaller, a deterministic
+// subset of those representatives is labeled. Later rounds remain
+// framework-owned uncertainty sampling.
 class ClusterSampler final : public ISampler {
  public:
   explicit ClusterSampler(ClusterSamplingOptions options);
