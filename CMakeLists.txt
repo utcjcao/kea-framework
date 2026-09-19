@@ -62,6 +62,13 @@ if(KEA_FRAMEWORK_BUILD_TESTS)
   add_test(NAME logistic_regression_trainer_test
            COMMAND logistic_regression_trainer_test)
 
+  add_executable(cluster_sampler_test
+    tests/cluster_sampler_test.cc
+  )
+  target_link_libraries(cluster_sampler_test PRIVATE kea_framework)
+  add_test(NAME cluster_sampler_test
+           COMMAND cluster_sampler_test)
+
   add_executable(proxy_training_runner_test
     tests/proxy_training_runner_test.cc
   )
@@ -93,6 +100,13 @@ if(KEA_FRAMEWORK_BUILD_TESTS)
         KEA_SEMBENCH_DIR="${KEA_SEMBENCH_DIR}"
       )
     endforeach()
+
+    add_executable(sembench_sweep tools/sembench_sweep.cc)
+    target_link_libraries(sembench_sweep PRIVATE kea_framework kea_sembench_test_support)
+    target_include_directories(sembench_sweep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(sembench_sweep PRIVATE
+      KEA_SEMBENCH_DIR="${KEA_SEMBENCH_DIR}"
+    )
   elseif(KEA_FRAMEWORK_BUILD_SEMBENCH_E2E_TESTS)
     message(STATUS "SemBench not found at ${KEA_SEMBENCH_DIR}; SemBench integration checks are skipped")
   endif()
