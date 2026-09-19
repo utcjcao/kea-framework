@@ -1,5 +1,7 @@
 #include "distributed/duckdb_shard_worker.h"
 
+#include <chrono>
+#include <cstdint>
 #include <stdexcept>
 #include <utility>
 
@@ -12,17 +14,40 @@
 namespace kea::distributed::detail {
 namespace {
 
+std::uint64_t ElapsedUs(const std::chrono::steady_clock::time_point& start) {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count());
+}
+
 LabeledExampleBatch LabelAndRecord(
     duckdb::Connection& connection,
-    const TrainingDataset& dataset,
     ILabeler& labeler,
-    const std::vector<RowId>& ids) {
-  const std::vector<Candidate> candidates =
-      kea::detail::FetchCandidatesByIds(connection, dataset, ids);
+    const std::vector<Candidate>& candidates,
+    const std::vector<RowId>& ids,
+    std::uint64_t sampling_us,
+    std::uint64_t fetching_us) {
   std::vector<LabeledExample> examples = labeler.Label(candidates);
   kea::detail::ValidateLabels(examples, ids);
   kea::detail::RecordLabeledIds(connection, ids);
-  return {"local", std::move(examples)};
+  return {"local", std::move(examples), sampling_us, fetching_us};
+}
+
+LabeledExampleBatch FetchLabelAndRecord(
+    duckdb::Connection& connection,
+    const TrainingDataset& dataset,
+    ILabeler& labeler,
+    const std::vector<RowId>& ids,
+    std::uint64_t sampling_us,
+    std::uint64_t prior_fetching_us,
+    kea::detail::CandidateFetchTiming* detailed_fetch_timing,
+    const kea::detail::EmbeddingCache* cache) {
+  const auto fetch_start = std::chrono::steady_clock::now();
+  const std::vector<Candidate> candidates =
+      kea::detail::FetchCandidatesByIds(connection, dataset, ids, detailed_fetch_timing, cache);
+  return LabelAndRecord(connection, labeler, candidates, ids, sampling_us,
+                        prior_fetching_us + ElapsedUs(fetch_start));
 }
 
 }  // namespace
@@ -54,15 +79,26 @@ LabeledExampleBatch DuckDbShardWorker::AcquireInitialLabels(
     const InitialSamplingRequest& request) {
   kea::detail::DropLabeledIdsTable(connection_);
   kea::detail::CreateLabeledIdsTable(connection_);
+  timing_ = {};
+  embedding_cache_ = {};
+  labeled_ids_.clear();
   try {
     if (request.label_budget == 0) {
       return {Id(), {}};
     }
-    kea::detail::DuckDbInitialSamplingContext sampling_context(connection_, request.dataset);
+    kea::detail::DuckDbInitialSamplingContext sampling_context(
+        connection_, request.dataset, &embedding_cache_);
+    const auto sampling_start = std::chrono::steady_clock::now();
     const std::vector<RowId> ids = sampler_.SelectInitial(
         sampling_context, request.label_budget, request.seed);
+    const std::uint64_t sampling_us = ElapsedUs(sampling_start);
+    timing_.initial_sampling = sampling_context.timing();
     kea::detail::ValidateSelectedIds(ids, request.label_budget);
-    auto batch = LabelAndRecord(connection_, request.dataset, labeler_, ids);
+    auto batch = FetchLabelAndRecord(
+        connection_, request.dataset, labeler_, ids, sampling_us, 0,
+        &timing_.initial_selected_fetch,
+        embedding_cache_.loaded ? &embedding_cache_ : nullptr);
+    labeled_ids_.insert(ids.begin(), ids.end());
     batch.shard_id = Id();
     return batch;
   } catch (...) {
@@ -73,14 +109,36 @@ LabeledExampleBatch DuckDbShardWorker::AcquireInitialLabels(
 
 LabeledExampleBatch DuckDbShardWorker::AcquireUncertainLabels(
     const RecursiveSamplingRequest& request) {
-  const std::vector<Candidate> candidates =
-      kea::detail::FetchUnlabeledCandidates(connection_, request.dataset);
-  const std::vector<RowId> ids = kea::detail::SelectMostUncertainIds(
-      candidates, request.current_model, request.label_budget);
-  if (ids.empty()) {
-    return {Id(), {}};
+  const auto unlabeled_fetch_start = std::chrono::steady_clock::now();
+  kea::detail::CandidateFetchTiming fetch_timing;
+  if (!embedding_cache_.loaded) {
+    kea::detail::LoadEmbeddingCache(connection_, request.dataset, embedding_cache_, &fetch_timing);
   }
-  auto batch = LabelAndRecord(connection_, request.dataset, labeler_, ids);
+  const auto cache_filter_start = std::chrono::steady_clock::now();
+  const std::vector<Candidate> candidates =
+      kea::detail::CachedUnlabeledCandidates(embedding_cache_, labeled_ids_);
+  fetch_timing.materialization_us += ElapsedUs(cache_filter_start);
+  timing_.recursive_unlabeled_fetch.query_us += fetch_timing.query_us;
+  timing_.recursive_unlabeled_fetch.materialization_us += fetch_timing.materialization_us;
+  const std::uint64_t unlabeled_fetching_us = ElapsedUs(unlabeled_fetch_start);
+  const auto sampling_start = std::chrono::steady_clock::now();
+  kea::detail::UncertaintySelectionTiming selection_timing;
+  const std::vector<Candidate> selected = kea::detail::SelectMostUncertainCandidates(
+      candidates, request.current_model, request.label_budget, &selection_timing);
+  timing_.recursive_scoring_us += selection_timing.scoring_us;
+  timing_.recursive_sort_and_copy_us += selection_timing.sorting_and_copying_us;
+  std::vector<RowId> ids;
+  ids.reserve(selected.size());
+  for (const Candidate& candidate : selected) {
+    ids.push_back(candidate.id);
+  }
+  const std::uint64_t sampling_us = ElapsedUs(sampling_start);
+  if (ids.empty()) {
+    return {Id(), {}, sampling_us, unlabeled_fetching_us};
+  }
+  auto batch = LabelAndRecord(
+      connection_, labeler_, selected, ids, sampling_us, unlabeled_fetching_us);
+  labeled_ids_.insert(ids.begin(), ids.end());
   batch.shard_id = Id();
   return batch;
 }

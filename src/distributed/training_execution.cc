@@ -1,6 +1,7 @@
 #include "distributed/training_execution.h"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <vector>
 
@@ -15,12 +16,36 @@ std::vector<LabeledExample> Flatten(const std::vector<LabeledExampleBatch>& batc
   return examples;
 }
 
+std::uint64_t SumSamplingUs(const std::vector<LabeledExampleBatch>& batches) {
+  std::uint64_t total = 0;
+  for (const auto& batch : batches) {
+    total += batch.sampling_us;
+  }
+  return total;
+}
+
+std::uint64_t SumFetchingUs(const std::vector<LabeledExampleBatch>& batches) {
+  std::uint64_t total = 0;
+  for (const auto& batch : batches) {
+    total += batch.fetching_us;
+  }
+  return total;
+}
+
+std::uint64_t ElapsedUs(const std::chrono::steady_clock::time_point& start) {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count());
+}
+
 }  // namespace
 
 ProxyModel RunCleanCentralTraining(
     const RunConfig& config,
     ITrainingExecutionBackend& backend,
-    const LogisticRegressionTrainer& trainer) {
+    const LogisticRegressionTrainer& trainer,
+    TrainingExecutionTiming* timing) {
   ValidateRunConfig(config);
   if (config.label_mode != LabelMode::Clean) {
     throw std::logic_error("Propagated labels are not implemented yet");
@@ -28,6 +53,10 @@ ProxyModel RunCleanCentralTraining(
   if (config.training_placement != TrainingPlacement::Central) {
     throw std::logic_error("Federated training is not implemented yet");
   }
+  if (timing != nullptr) {
+    *timing = {};
+  }
+  const auto total_start = std::chrono::steady_clock::now();
 
   const std::size_t initial_budget =
       config.rounds == 1
@@ -43,11 +72,22 @@ ProxyModel RunCleanCentralTraining(
   initial_request.label_budget = initial_budget;
   initial_request.seed = config.seed;
 
-  std::vector<LabeledExample> all_examples = Flatten(backend.AcquireInitialLabels(initial_request));
+  const auto initial_acquisition_start = std::chrono::steady_clock::now();
+  const std::vector<LabeledExampleBatch> initial_batches =
+      backend.AcquireInitialLabels(initial_request);
+  std::vector<LabeledExample> all_examples = Flatten(initial_batches);
+  const std::uint64_t initial_acquisition_us = ElapsedUs(initial_acquisition_start);
   if (all_examples.empty()) {
     throw std::runtime_error("Initial sampling produced no labeled examples");
   }
+  const auto initial_training_start = std::chrono::steady_clock::now();
   ProxyModel model = trainer.Train(all_examples);
+  const std::uint64_t initial_training_us = ElapsedUs(initial_training_start);
+  if (timing != nullptr) {
+    timing->rounds.push_back({0, initial_budget, all_examples.size(),
+                              SumSamplingUs(initial_batches), SumFetchingUs(initial_batches),
+                              initial_acquisition_us, initial_training_us});
+  }
   backend.BroadcastModel({model, 0});
 
   for (std::size_t round = 1; round < config.rounds && remaining_budget > 0; ++round) {
@@ -59,14 +99,32 @@ ProxyModel RunCleanCentralTraining(
     request.label_budget = budget;
     request.round_index = round;
 
-    const std::vector<LabeledExample> labels = Flatten(backend.AcquireUncertainLabels(request));
+    const auto acquisition_start = std::chrono::steady_clock::now();
+    const std::vector<LabeledExampleBatch> batches = backend.AcquireUncertainLabels(request);
+    const std::vector<LabeledExample> labels = Flatten(batches);
+    const std::uint64_t acquisition_us = ElapsedUs(acquisition_start);
     if (labels.empty()) {
+      if (timing != nullptr) {
+        timing->rounds.push_back({round, budget, 0,
+                                  SumSamplingUs(batches), SumFetchingUs(batches),
+                                  acquisition_us, 0});
+      }
       break;
     }
     all_examples.insert(all_examples.end(), labels.begin(), labels.end());
+    const auto training_start = std::chrono::steady_clock::now();
     model = trainer.Train(all_examples);
+    const std::uint64_t training_us = ElapsedUs(training_start);
+    if (timing != nullptr) {
+      timing->rounds.push_back({round, budget, labels.size(),
+                                SumSamplingUs(batches), SumFetchingUs(batches),
+                                acquisition_us, training_us});
+    }
     backend.BroadcastModel({model, round});
     remaining_budget -= labels.size();
+  }
+  if (timing != nullptr) {
+    timing->total_us = ElapsedUs(total_start);
   }
   return model;
 }

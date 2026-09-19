@@ -1,6 +1,7 @@
 #include "detail/proxy_training_helpers.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <unordered_set>
@@ -37,27 +38,46 @@ void ValidateLabels(const std::vector<LabeledExample>& examples,
   }
 }
 
-std::vector<RowId> SelectMostUncertainIds(
+std::vector<Candidate> SelectMostUncertainCandidates(
     const std::vector<Candidate>& candidates,
     const ProxyModel& model,
-    std::size_t budget) {
-  std::vector<std::pair<float, RowId>> scores;
-  scores.reserve(candidates.size());
-  for (const Candidate& candidate : candidates) {
-    const float uncertainty = std::abs(model.PredictProbability(candidate.embedding) - 0.5F);
-    scores.emplace_back(uncertainty, candidate.id);
+    std::size_t budget,
+    UncertaintySelectionTiming* timing) {
+  if (timing != nullptr) {
+    *timing = {};
   }
-  std::sort(scores.begin(), scores.end(), [](const auto& left, const auto& right) {
-    return left.first == right.first ? left.second < right.second : left.first < right.first;
+  const auto scoring_start = std::chrono::steady_clock::now();
+  std::vector<std::pair<float, std::size_t>> scores;
+  scores.reserve(candidates.size());
+  for (std::size_t index = 0; index < candidates.size(); ++index) {
+    const Candidate& candidate = candidates[index];
+    const float uncertainty = std::abs(model.PredictProbability(candidate.embedding) - 0.5F);
+    scores.emplace_back(uncertainty, index);
+  }
+  if (timing != nullptr) {
+    timing->scoring_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - scoring_start).count());
+  }
+  const auto selection_start = std::chrono::steady_clock::now();
+  std::sort(scores.begin(), scores.end(), [&candidates](const auto& left, const auto& right) {
+    return left.first == right.first
+        ? candidates[left.second].id < candidates[right.second].id
+        : left.first < right.first;
   });
 
   const std::size_t count = std::min(budget, scores.size());
-  std::vector<RowId> selected_ids;
-  selected_ids.reserve(count);
+  std::vector<Candidate> selected;
+  selected.reserve(count);
   for (std::size_t index = 0; index < count; ++index) {
-    selected_ids.push_back(scores[index].second);
+    selected.push_back(candidates[scores[index].second]);
   }
-  return selected_ids;
+  if (timing != nullptr) {
+    timing->sorting_and_copying_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - selection_start).count());
+  }
+  return selected;
 }
 
 }  // namespace kea::detail

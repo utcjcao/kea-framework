@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,8 @@ struct LocalTrainingRequest {
 struct LabeledExampleBatch {
   ShardId shard_id;
   std::vector<LabeledExample> examples;
+  std::uint64_t sampling_us = 0;
+  std::uint64_t fetching_us = 0;
 };
 
 struct LocalModelResult {
