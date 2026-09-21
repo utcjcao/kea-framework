@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <unordered_set>
 
 #include "detail/training_data_access.h"
@@ -51,6 +52,8 @@ class DuckDbShardWorker final : public IShardWorker {
   ILabeler& labeler_;
   ShardWorkerTiming timing_;
   kea::detail::EmbeddingCache embedding_cache_;
+  std::optional<kea::detail::ClusterPartition> cluster_partition_;
+  std::vector<LabeledExample> direct_labels_;
   std::unordered_set<RowId> labeled_ids_;
 };
 

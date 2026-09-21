@@ -14,6 +14,7 @@
 #include "kea/function_labeler.h"
 #include "kea/proxy_training.h"
 #include "kea/run_config.h"
+#include "kea/samplers/cluster_sampler.h"
 #include "kea/samplers/random_sampler.h"
 
 namespace {
@@ -63,6 +64,41 @@ void RunEndToEndCase(
   assert(probability >= 0.0F && probability <= 1.0F);
 }
 
+void RunPropagatedEndToEndCase(const kea::test::SemBenchDatasetPaths& dataset) {
+  duckdb::DuckDB database(nullptr);
+  duckdb::Connection connection(database);
+  const auto examples = kea::test::LoadSemBenchExamples(
+      connection, dataset, kRowsPerDataset);
+  kea::test::CreateExamplesTable(connection, examples);
+
+  const auto labels = kea::test::LabelsById(examples);
+  std::vector<kea::RowId> labeled_ids;
+  kea::FunctionLabeler oracle([&labels, &labeled_ids](const kea::Candidate& candidate) {
+    labeled_ids.push_back(candidate.id);
+    return labels.at(candidate.id);
+  });
+  kea::ClusterSamplingOptions options;
+  options.cluster_count = 16;
+  options.max_iterations = 5;
+  kea::ClusterSampler sampler(options);
+  kea::ProxyTrainingRunner runner(connection);
+  kea::RunConfig config;
+  config.dataset.table_name = "examples";
+  config.label_mode = kea::LabelMode::Propagated;
+  config.rounds = 2;
+  config.label_budget = 32;
+  config.initial_label_fraction = 0.5;
+  config.seed = 42;
+
+  const kea::ProxyModel model = runner.Run(config, sampler, oracle);
+  // The pseudo-labeled expansion must not create additional labeler calls.
+  assert(labeled_ids.size() == config.label_budget);
+  assert(std::unordered_set<kea::RowId>(labeled_ids.begin(), labeled_ids.end()).size() ==
+         config.label_budget);
+  assert(model.weights.size() == 1024);
+  assert(std::isfinite(model.intercept));
+}
+
 }  // namespace
 
 int main() {
@@ -75,6 +111,8 @@ int main() {
   RunEndToEndCase(kea::test::FindSemBenchDataset(
       sembench_root, kea::test::SemBenchDataset::Fever),
       /*rounds=*/3, /*label_budget=*/96);
+  RunPropagatedEndToEndCase(kea::test::FindSemBenchDataset(
+      sembench_root, kea::test::SemBenchDataset::Movie));
 }
 
 #else

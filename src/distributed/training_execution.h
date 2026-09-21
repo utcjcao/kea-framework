@@ -27,9 +27,10 @@ struct TrainingExecutionTiming {
   std::uint64_t total_us = 0;
 };
 
-// Shared clean-label, central-training rounds loop. Both the one-shard local
-// backend and the multi-shard test backend use this implementation.
-[[nodiscard]] ProxyModel RunCleanCentralTraining(
+// Shared central-training rounds loop. For clean labels it trains on direct
+// labels; for propagated labels it trains on each worker's current expanded
+// cluster-labeled dataset.
+[[nodiscard]] ProxyModel RunCentralTraining(
     const RunConfig& config,
     ITrainingExecutionBackend& backend,
     const LogisticRegressionTrainer& trainer,

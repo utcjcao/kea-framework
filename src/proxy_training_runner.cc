@@ -24,7 +24,7 @@ ProxyModel ProxyTrainingRunner::Run(
   auto worker = std::make_shared<distributed::detail::DuckDbShardWorker>(
       "local", connection_, sampler, labeler);
   distributed::SingleMachineBackend backend(worker);
-  return distributed::detail::RunCleanCentralTraining(config, backend, trainer_);
+  return distributed::detail::RunCentralTraining(config, backend, trainer_);
 }
 
 }  // namespace kea

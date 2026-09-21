@@ -8,10 +8,21 @@
 namespace kea::distributed::detail {
 namespace {
 
-std::vector<LabeledExample> Flatten(const std::vector<LabeledExampleBatch>& batches) {
+std::vector<LabeledExample> FlattenDirectLabels(
+    const std::vector<LabeledExampleBatch>& batches) {
   std::vector<LabeledExample> examples;
   for (const auto& batch : batches) {
     examples.insert(examples.end(), batch.examples.begin(), batch.examples.end());
+  }
+  return examples;
+}
+
+std::vector<LabeledExample> FlattenPropagatedTrainingExamples(
+    const std::vector<LabeledExampleBatch>& batches) {
+  std::vector<LabeledExample> examples;
+  for (const auto& batch : batches) {
+    examples.insert(examples.end(),
+                    batch.propagated_examples.begin(), batch.propagated_examples.end());
   }
   return examples;
 }
@@ -41,15 +52,12 @@ std::uint64_t ElapsedUs(const std::chrono::steady_clock::time_point& start) {
 
 }  // namespace
 
-ProxyModel RunCleanCentralTraining(
+ProxyModel RunCentralTraining(
     const RunConfig& config,
     ITrainingExecutionBackend& backend,
     const LogisticRegressionTrainer& trainer,
     TrainingExecutionTiming* timing) {
   ValidateRunConfig(config);
-  if (config.label_mode != LabelMode::Clean) {
-    throw std::logic_error("Propagated labels are not implemented yet");
-  }
   if (config.training_placement != TrainingPlacement::Central) {
     throw std::logic_error("Federated training is not implemented yet");
   }
@@ -75,16 +83,23 @@ ProxyModel RunCleanCentralTraining(
   const auto initial_acquisition_start = std::chrono::steady_clock::now();
   const std::vector<LabeledExampleBatch> initial_batches =
       backend.AcquireInitialLabels(initial_request);
-  std::vector<LabeledExample> all_examples = Flatten(initial_batches);
+  std::vector<LabeledExample> all_direct_labels = FlattenDirectLabels(initial_batches);
   const std::uint64_t initial_acquisition_us = ElapsedUs(initial_acquisition_start);
-  if (all_examples.empty()) {
+  if (all_direct_labels.empty()) {
     throw std::runtime_error("Initial sampling produced no labeled examples");
   }
+  std::vector<LabeledExample> training_examples =
+      config.label_mode == LabelMode::Clean
+          ? all_direct_labels
+          : FlattenPropagatedTrainingExamples(initial_batches);
+  if (training_examples.empty()) {
+    throw std::runtime_error("Propagated initial sampling produced no training examples");
+  }
   const auto initial_training_start = std::chrono::steady_clock::now();
-  ProxyModel model = trainer.Train(all_examples);
+  ProxyModel model = trainer.Train(training_examples);
   const std::uint64_t initial_training_us = ElapsedUs(initial_training_start);
   if (timing != nullptr) {
-    timing->rounds.push_back({0, initial_budget, all_examples.size(),
+    timing->rounds.push_back({0, initial_budget, all_direct_labels.size(),
                               SumSamplingUs(initial_batches), SumFetchingUs(initial_batches),
                               initial_acquisition_us, initial_training_us});
   }
@@ -96,12 +111,13 @@ ProxyModel RunCleanCentralTraining(
     RecursiveSamplingRequest request;
     request.dataset = config.dataset;
     request.current_model = model;
+    request.label_mode = config.label_mode;
     request.label_budget = budget;
     request.round_index = round;
 
     const auto acquisition_start = std::chrono::steady_clock::now();
     const std::vector<LabeledExampleBatch> batches = backend.AcquireUncertainLabels(request);
-    const std::vector<LabeledExample> labels = Flatten(batches);
+    const std::vector<LabeledExample> labels = FlattenDirectLabels(batches);
     const std::uint64_t acquisition_us = ElapsedUs(acquisition_start);
     if (labels.empty()) {
       if (timing != nullptr) {
@@ -111,9 +127,15 @@ ProxyModel RunCleanCentralTraining(
       }
       break;
     }
-    all_examples.insert(all_examples.end(), labels.begin(), labels.end());
+    all_direct_labels.insert(all_direct_labels.end(), labels.begin(), labels.end());
+    training_examples = config.label_mode == LabelMode::Clean
+        ? all_direct_labels
+        : FlattenPropagatedTrainingExamples(batches);
+    if (training_examples.empty()) {
+      throw std::runtime_error("Propagated recursive sampling produced no training examples");
+    }
     const auto training_start = std::chrono::steady_clock::now();
-    model = trainer.Train(all_examples);
+    model = trainer.Train(training_examples);
     const std::uint64_t training_us = ElapsedUs(training_start);
     if (timing != nullptr) {
       timing->rounds.push_back({round, budget, labels.size(),

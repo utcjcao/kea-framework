@@ -180,6 +180,7 @@ std::vector<RowId> DuckDbInitialSamplingContext::SelectClusterRepresentativeIds(
   }
 
   timing_ = {};
+  cluster_partition_.reset();
   EmbeddingCache local_cache;
   EmbeddingCache& cache = cache_ != nullptr ? *cache_ : local_cache;
   CandidateFetchTiming cache_timing;
@@ -215,6 +216,13 @@ std::vector<RowId> DuckDbInitialSamplingContext::SelectClusterRepresentativeIds(
   kmeans.Cluster(features, cluster_count, assignments, centroids);
   timing_.kmeans_us = ElapsedUs(kmeans_start);
 
+  ClusterPartition partition;
+  partition.cluster_for_id.reserve(cache.rows.size());
+  for (std::size_t index = 0; index < cache.rows.size(); ++index) {
+    partition.cluster_for_id.emplace(cache.rows[index].id, assignments[index]);
+  }
+  cluster_partition_ = std::move(partition);
+
   const auto representatives_start = Clock::now();
   std::vector<std::size_t> representative_indices(cluster_count, cache.rows.size());
   std::vector<double> representative_distances(cluster_count, 0.0);
@@ -238,6 +246,47 @@ std::vector<RowId> DuckDbInitialSamplingContext::SelectClusterRepresentativeIds(
   }
   timing_.representative_selection_us = ElapsedUs(representatives_start);
   return representative_ids;
+}
+
+std::vector<LabeledExample> BuildPropagatedExamples(
+    const EmbeddingCache& cache,
+    const ClusterPartition& partition,
+    const std::vector<LabeledExample>& direct_labels) {
+  struct Votes {
+    std::size_t positives = 0;
+    std::size_t negatives = 0;
+  };
+  std::unordered_map<std::size_t, Votes> votes;
+  for (const LabeledExample& direct : direct_labels) {
+    const auto assignment = partition.cluster_for_id.find(direct.candidate.id);
+    if (assignment == partition.cluster_for_id.end()) {
+      continue;
+    }
+    Votes& cluster_votes = votes[assignment->second];
+    if (direct.label == 1) {
+      ++cluster_votes.positives;
+    } else {
+      ++cluster_votes.negatives;
+    }
+  }
+
+  std::vector<LabeledExample> propagated;
+  propagated.reserve(cache.rows.size());
+  for (const CachedEmbedding& row : cache.rows) {
+    const auto assignment = partition.cluster_for_id.find(row.id);
+    if (assignment == partition.cluster_for_id.end()) {
+      continue;
+    }
+    const auto cluster_votes = votes.find(assignment->second);
+    if (cluster_votes == votes.end()) {
+      continue;
+    }
+    // A tie is positive, matching SwanLake's recursive propagation rule.
+    const int pseudo_label =
+        cluster_votes->second.positives >= cluster_votes->second.negatives ? 1 : 0;
+    propagated.push_back({{row.id, {}, row.embedding}, pseudo_label});
+  }
+  return propagated;
 }
 
 void CreateLabeledIdsTable(duckdb::Connection& connection) {

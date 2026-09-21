@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "kea/proxy_training.h"
@@ -42,6 +44,12 @@ struct EmbeddingCache {
   bool loaded = false;
 };
 
+// Reusable result of k-means. The sampler consumes representative IDs, while
+// propagated-label training also needs each row's cluster assignment.
+struct ClusterPartition {
+  std::unordered_map<RowId, std::size_t> cluster_for_id;
+};
+
 void LoadEmbeddingCache(
     duckdb::Connection& connection,
     const TrainingDataset& dataset,
@@ -69,13 +77,25 @@ class DuckDbInitialSamplingContext final : public IInitialSamplingContext {
       std::uint64_t seed) override;
 
   [[nodiscard]] const InitialSamplingTiming& timing() const { return timing_; }
+  [[nodiscard]] std::optional<ClusterPartition> TakeClusterPartition() {
+    return std::move(cluster_partition_);
+  }
 
  private:
   duckdb::Connection& connection_;
   const TrainingDataset& dataset_;
   EmbeddingCache* cache_;
   InitialSamplingTiming timing_;
+  std::optional<ClusterPartition> cluster_partition_;
 };
+
+// Expands accumulated direct labels over a cluster partition for training.
+// Each covered cluster receives its direct-label majority; ties are positive.
+// Clusters without a direct label are omitted. This does not mutate DuckDB.
+[[nodiscard]] std::vector<LabeledExample> BuildPropagatedExamples(
+    const EmbeddingCache& cache,
+    const ClusterPartition& partition,
+    const std::vector<LabeledExample>& direct_labels);
 
 void CreateLabeledIdsTable(duckdb::Connection& connection);
 void DropLabeledIdsTable(duckdb::Connection& connection);

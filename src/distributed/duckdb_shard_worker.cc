@@ -31,7 +31,11 @@ LabeledExampleBatch LabelAndRecord(
   std::vector<LabeledExample> examples = labeler.Label(candidates);
   kea::detail::ValidateLabels(examples, ids);
   kea::detail::RecordLabeledIds(connection, ids);
-  return {"local", std::move(examples), sampling_us, fetching_us};
+  LabeledExampleBatch batch;
+  batch.examples = std::move(examples);
+  batch.sampling_us = sampling_us;
+  batch.fetching_us = fetching_us;
+  return batch;
 }
 
 LabeledExampleBatch FetchLabelAndRecord(
@@ -81,6 +85,8 @@ LabeledExampleBatch DuckDbShardWorker::AcquireInitialLabels(
   kea::detail::CreateLabeledIdsTable(connection_);
   timing_ = {};
   embedding_cache_ = {};
+  cluster_partition_.reset();
+  direct_labels_.clear();
   labeled_ids_.clear();
   try {
     if (request.label_budget == 0) {
@@ -99,6 +105,16 @@ LabeledExampleBatch DuckDbShardWorker::AcquireInitialLabels(
         &timing_.initial_selected_fetch,
         embedding_cache_.loaded ? &embedding_cache_ : nullptr);
     labeled_ids_.insert(ids.begin(), ids.end());
+    direct_labels_ = batch.examples;
+    if (request.label_mode == LabelMode::Propagated) {
+      cluster_partition_ = sampling_context.TakeClusterPartition();
+      if (!cluster_partition_.has_value()) {
+        throw std::invalid_argument(
+            "Propagated labels require a sampler that creates a cluster partition");
+      }
+      batch.propagated_examples = kea::detail::BuildPropagatedExamples(
+          embedding_cache_, *cluster_partition_, direct_labels_);
+    }
     batch.shard_id = Id();
     return batch;
   } catch (...) {
@@ -134,11 +150,19 @@ LabeledExampleBatch DuckDbShardWorker::AcquireUncertainLabels(
   }
   const std::uint64_t sampling_us = ElapsedUs(sampling_start);
   if (ids.empty()) {
-    return {Id(), {}, sampling_us, unlabeled_fetching_us};
+    return {Id(), {}, {}, sampling_us, unlabeled_fetching_us};
   }
   auto batch = LabelAndRecord(
       connection_, labeler_, selected, ids, sampling_us, unlabeled_fetching_us);
   labeled_ids_.insert(ids.begin(), ids.end());
+  direct_labels_.insert(direct_labels_.end(), batch.examples.begin(), batch.examples.end());
+  if (request.label_mode == LabelMode::Propagated) {
+    if (!cluster_partition_.has_value()) {
+      throw std::logic_error("Propagated recursive labels require an initial cluster partition");
+    }
+    batch.propagated_examples = kea::detail::BuildPropagatedExamples(
+        embedding_cache_, *cluster_partition_, direct_labels_);
+  }
   batch.shard_id = Id();
   return batch;
 }

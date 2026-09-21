@@ -289,7 +289,7 @@ void RunDatasetSweep(
 
             kea::distributed::detail::TrainingExecutionTiming timing;
             const kea::LogisticRegressionTrainer trainer;
-            const kea::ProxyModel model = kea::distributed::detail::RunCleanCentralTraining(
+            const kea::ProxyModel model = kea::distributed::detail::RunCentralTraining(
                 config, backend, trainer, &timing);
             const EvaluationResult evaluation = EvaluateProxy(model, examples);
             const auto& detailed_timing = worker->timing();

@@ -118,7 +118,7 @@ void RunSemBenchDistributedFlow() {
   lc1_config.workers = {{"shard-a", "in-process://a"}, {"shard-b", "in-process://b"}};
 
   const kea::LogisticRegressionTrainer trainer;
-  const kea::ProxyModel lc1_model = kea::distributed::detail::RunCleanCentralTraining(
+  const kea::ProxyModel lc1_model = kea::distributed::detail::RunCentralTraining(
       lc1_config, multi_backend, trainer);
   assert(labeled_ids.size() == 48);
   assert(std::unordered_set<kea::RowId>(labeled_ids.begin(), labeled_ids.end()).size() == 48);
