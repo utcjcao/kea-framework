@@ -27,6 +27,7 @@
 
 #include "kea/proxy_training.h"
 #include "kea/run_config.h"
+#include "kea/training_data_builder.h"
 #include "kea/samplers/cluster_sampler.h"
 #include "kea/samplers/random_sampler.h"
 
@@ -217,8 +218,23 @@ std::string SamplerName(bool cluster) {
   return cluster ? "cluster" : "random";
 }
 
+enum class TrainingDataMode {
+  Direct,
+  ClusterPropagation,
+};
+
+std::string TrainingDataModeName(TrainingDataMode mode) {
+  return mode == TrainingDataMode::Direct ? "direct" : "cluster_propagation";
+}
+
+struct UncertaintyCenters {
+  double first = 0.5;
+  double second = 0.5;
+};
+
 void WriteHeader(std::ofstream& output) {
-  output << "dataset,sampler,label_budget,rounds,initial_label_fraction,seed,rows,embedding_dimensions,"
+  output << "dataset,sampler,training_data_mode,label_budget,rounds,initial_label_fraction,"
+         << "uncertainty_center_1,uncertainty_center_2,seed,rows,embedding_dimensions,"
          << "data_setup_ms,initial_sampling_ms,initial_fetching_ms,initial_labeling_ms,"
          << "initial_training_ms,recursive_sampling_ms,recursive_fetching_ms,recursive_labeling_ms,"
          << "recursive_training_ms,phase_a_total_ms,phase_a_labels,proxy_scoring_ms,proxy_accuracy,aurac,"
@@ -239,6 +255,7 @@ void RunDatasetSweep(
     const std::vector<std::size_t>& cluster_budgets,
     const std::vector<std::size_t>& rounds_to_run,
     const std::vector<double>& recursive_initial_fractions,
+    const std::vector<UncertaintyCenters>& recursive_uncertainty_centers,
     const std::vector<std::uint64_t>& seeds,
     std::ofstream& output) {
   duckdb::DuckDB database(nullptr);
@@ -253,19 +270,32 @@ void RunDatasetSweep(
   const auto labels = kea::test::LabelsById(examples);
 
   std::size_t completed = 0;
-  const std::size_t configurations_per_budget = 1 +
-      (rounds_to_run.size() - std::count(rounds_to_run.begin(), rounds_to_run.end(), 1)) *
-          recursive_initial_fractions.size();
+  std::size_t configurations_per_budget = 0;
+  for (const std::size_t rounds : rounds_to_run) {
+    configurations_per_budget += rounds == 1
+        ? 1
+        : recursive_initial_fractions.size() * recursive_uncertainty_centers.size();
+  }
   const std::size_t total_runs =
-      (random_budgets.size() + cluster_budgets.size()) * configurations_per_budget * seeds.size();
+      (random_budgets.size() + 2 * cluster_budgets.size()) *
+      configurations_per_budget * seeds.size();
   for (const bool cluster : {false, true}) {
     const std::vector<std::size_t>& budgets = cluster ? cluster_budgets : random_budgets;
-    for (const std::size_t budget : budgets) {
-      for (const std::size_t rounds : rounds_to_run) {
-        const std::vector<double> fractions =
-            rounds == 1 ? std::vector<double>{1.0} : recursive_initial_fractions;
-        for (const double fraction : fractions) {
-          for (const std::uint64_t seed : seeds) {
+    const std::vector<TrainingDataMode> training_data_modes = cluster
+        ? std::vector<TrainingDataMode>{
+              TrainingDataMode::Direct, TrainingDataMode::ClusterPropagation}
+        : std::vector<TrainingDataMode>{TrainingDataMode::Direct};
+    for (const TrainingDataMode training_data_mode : training_data_modes) {
+      for (const std::size_t budget : budgets) {
+        for (const std::size_t rounds : rounds_to_run) {
+          const std::vector<double> fractions =
+              rounds == 1 ? std::vector<double>{1.0} : recursive_initial_fractions;
+          for (const double fraction : fractions) {
+            const std::vector<UncertaintyCenters> centers = rounds == 1
+                ? std::vector<UncertaintyCenters>{{0.5, 0.5}}
+                : recursive_uncertainty_centers;
+            for (const UncertaintyCenters& uncertainty_centers : centers) {
+              for (const std::uint64_t seed : seeds) {
             std::unique_ptr<kea::ISampler> base_sampler;
             if (cluster) {
               kea::ClusterSamplingOptions options;
@@ -277,14 +307,23 @@ void RunDatasetSweep(
             }
             TimedSampler sampler(*base_sampler);
             TimedOracleLabeler labeler(labels);
+            std::unique_ptr<kea::ITrainingDataBuilder> training_data_builder;
+            if (training_data_mode == TrainingDataMode::Direct) {
+              training_data_builder = std::make_unique<kea::DirectLabelTrainingDataBuilder>();
+            } else {
+              training_data_builder =
+                  std::make_unique<kea::ClusterPropagationTrainingDataBuilder>();
+            }
             auto worker = std::make_shared<kea::distributed::detail::DuckDbShardWorker>(
-                "local", connection, sampler, labeler);
+                "local", connection, sampler, labeler, *training_data_builder);
             kea::distributed::SingleMachineBackend backend(worker);
             kea::RunConfig config;
             config.dataset.table_name = "examples";
             config.rounds = rounds;
             config.label_budget = budget;
             config.initial_label_fraction = fraction;
+            config.uncertainty_center_1 = uncertainty_centers.first;
+            config.uncertainty_center_2 = uncertainty_centers.second;
             config.seed = seed;
 
             kea::distributed::detail::TrainingExecutionTiming timing;
@@ -307,8 +346,11 @@ void RunDatasetSweep(
             const std::size_t narrow_total_calls = phase_a_labels + evaluation.narrow_band.escalations;
             const std::size_t wide_total_calls = phase_a_labels + evaluation.wide_band.escalations;
 
-            output << dataset_name << ',' << SamplerName(cluster) << ',' << budget << ',' << rounds << ','
-                   << std::fixed << std::setprecision(3) << fraction << ',' << seed << ',' << examples.size() << ','
+            output << dataset_name << ',' << SamplerName(cluster) << ','
+                   << TrainingDataModeName(training_data_mode) << ',' << budget << ',' << rounds << ','
+                   << std::fixed << std::setprecision(3) << fraction << ','
+                   << uncertainty_centers.first << ',' << uncertainty_centers.second << ','
+                   << seed << ',' << examples.size() << ','
                    << examples.front().candidate.embedding.size() << ','
                    << std::fixed << std::setprecision(3)
                    << UsToMs(data_setup_us) << ',' << UsToMs(initial_round.sampling_us) << ','
@@ -339,6 +381,8 @@ void RunDatasetSweep(
             output.flush();
             ++completed;
             std::cerr << '[' << dataset_name << "] completed " << completed << '/' << total_runs << '\n';
+              }
+            }
           }
         }
       }
@@ -357,23 +401,51 @@ int main(int argc, char** argv) {
     throw std::runtime_error("Unable to open output file " + output_path.string());
   }
   // Use equal budgets for a direct random-versus-cluster comparison.
-  std::vector<std::size_t> random_budgets = {32, 64, 128};
-  std::vector<std::size_t> cluster_budgets = {32, 64, 128};
+  std::vector<std::size_t> random_budgets = {32, 64, 128, 512, 1024};
+  std::vector<std::size_t> cluster_budgets = {32, 64, 128, 512, 1024};
   std::vector<std::size_t> rounds = {1, 3, 5};
   std::vector<double> recursive_initial_fractions = {0.2};
+  std::vector<UncertaintyCenters> recursive_uncertainty_centers = {{0.5, 0.5}};
   std::vector<std::uint64_t> seeds = {42, 43, 44};
+  bool chunk_loader_benchmark = false;
 
-  // A fast representative estimate: one random and one clustered budget,
-  // all requested round counts, one seed, on each dataset.
-  if (argc > 2 && std::string(argv[2]) == "--sample") {
-    random_budgets = {64};
-    cluster_budgets = {64};
-    seeds = {42};
+  if (argc > 2) {
+    const std::string mode = argv[2];
+    // A fast representative estimate: one random and one clustered budget,
+    // all requested round counts, one seed, on each dataset.
+    if (mode == "--sample") {
+      random_budgets = {64};
+      cluster_budgets = {64};
+      seeds = {42};
+    } else if (mode == "--loader-benchmark") {
+      // Six rows that directly match the documented Movie cluster K=64
+      // configurations for both direct and propagated training data.
+      random_budgets = {};
+      cluster_budgets = {64};
+      rounds = {1, 3, 5};
+      seeds = {42};
+      chunk_loader_benchmark = true;
+    } else if (mode == "--uncertainty-centers") {
+      // Centers only affect recursive acquisition. One-shot rows would be
+      // identical duplicates. Sweep low/mid budgets to measure how the
+      // preferred center policy changes with the label budget. Larger values
+      // are covered by the main sweep but make this focused experiment
+      // disproportionately expensive.
+      random_budgets = {64, 128, 256};
+      cluster_budgets = {64, 128, 256};
+      rounds = {3, 5};
+      recursive_uncertainty_centers = {{0.5, 0.5}, {0.1, 0.9}, {0.2, 0.8}};
+    } else {
+      throw std::invalid_argument(
+          "Expected --sample, --loader-benchmark, or --uncertainty-centers");
+    }
   }
   WriteHeader(output);
   RunDatasetSweep("movie", kea::test::SemBenchDataset::Movie, random_budgets, cluster_budgets,
-                  rounds, recursive_initial_fractions, seeds, output);
-  RunDatasetSweep("fever", kea::test::SemBenchDataset::Fever, random_budgets, cluster_budgets,
-                  rounds, recursive_initial_fractions, seeds, output);
+                  rounds, recursive_initial_fractions, recursive_uncertainty_centers, seeds, output);
+  if (!chunk_loader_benchmark) {
+    RunDatasetSweep("fever", kea::test::SemBenchDataset::Fever, random_budgets, cluster_budgets,
+                    rounds, recursive_initial_fractions, recursive_uncertainty_centers, seeds, output);
+  }
   std::cerr << "Wrote results to " << output_path << '\n';
 }
