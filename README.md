@@ -2,14 +2,16 @@ Kea trains a logistic-regression proxy from labeled examples selected by an
 extensible sampler. A single `ProxyTrainingRunner` owns the training loop;
 single-machine execution is the currently implemented deployment mode.
 
-There are two developer-provided extension points:
+There are three developer-provided extension points:
 
 - `ISampler`: how to choose the initial points used to train the model;
 - `ILabeler`: how selected candidates receive binary labels.
+- `ITrainingDataBuilder`: which direct and derived labels are used to train
+  the proxy.
 
 `RunConfig` specifies shared run parameters such as the dataset, total label
-budget, number of rounds, random seed, label semantics, and eventual
-execution/training placement.
+budget, number of rounds, random seed, and eventual execution/training
+placement.
 
 ## Configuring a training run
 
@@ -21,6 +23,7 @@ sampler-specific options, and sets the number of total training rounds.
 #include "kea/proxy_training.h"
 #include "kea/run_config.h"
 #include "kea/samplers/random_sampler.h"
+#include "kea/training_data_builder.h"
 
 duckdb::Connection connection(database);
 
@@ -32,6 +35,8 @@ config.dataset.embedding_column = "embedding";
 config.rounds = 5;                 // 1 = one-shot; >1 = recursive uncertainty rounds
 config.label_budget = 150;         // total labels across every round
 config.initial_label_fraction = 0.2;
+config.uncertainty_center_1 = 0.5; // recursive selection target(s)
+config.uncertainty_center_2 = 0.5; // both 0.5 preserves the default policy
 config.seed = 42;
 
 kea::RandomSampler sampler;
@@ -40,7 +45,8 @@ kea::FunctionLabeler labeler([](const kea::Candidate& candidate) {
 });
 
 kea::ProxyTrainingRunner runner(connection);
-kea::ProxyModel model = runner.Run(config, sampler, labeler);
+kea::DirectLabelTrainingDataBuilder training_data_builder;
+kea::ProxyModel model = runner.Run(config, sampler, labeler, training_data_builder);
 // model.weights and model.intercept
 ```
 
@@ -62,6 +68,13 @@ representatives. For example, a 1,000-label run with a 10% initial fraction
 forms 1,000 clusters and labels a deterministic subset of 100 representatives
 in round 0.
 
+For recursive runs, each remaining candidate is ranked by its distance from
+the nearer configured uncertainty center:
+`min(abs(score - uncertainty_center_1), abs(score - uncertainty_center_2))`.
+Lower distances are labeled first. Both centers default to `0.5`, preserving
+the original “closest to 0.5” behavior; for example, centers `0.2` and `0.8`
+prefer candidates near either score.
+
 The combinations map to the supported strategies as follows:
 
 | Initial sampler | `rounds` | Behavior |
@@ -72,9 +85,10 @@ The combinations map to the supported strategies as follows:
 | `ClusterSampler` | `> 1` | cluster representatives followed by uncertainty sampling (`gc1rec`) |
 
 The public C++ API is declared in `include/kea/proxy_training.h` and
-`include/kea/run_config.h`. It keeps DuckDB as the data store, exposes initial
-sampling and labeling extension points, and leaves recursive uncertainty
-sampling under the runner's control.
+`include/kea/run_config.h`; training-data builders are declared in
+`include/kea/training_data_builder.h`. It keeps DuckDB as the data store,
+exposes initial sampling, labeling, and training-data-building extension
+points, and leaves recursive uncertainty sampling under the runner's control.
 
 `include/kea/samplers/random_sampler.h` provides the first sampler implementation. It
 requests a seed-stable random initial batch; the DuckDB sampling context owns
@@ -85,11 +99,12 @@ logistic regression and returns the learned intercept and weights. Its C++17
 unit test is in `tests/logistic_regression_trainer_test.cc`.
 
 `ProxyTrainingRunner` implements the complete single-machine MVP flow:
-initial sampling, labeling, training, recursive uncertainty sampling, and
-retraining. It returns the final `ProxyModel` directly. The SemBench-backed
-end-to-end test is in `tests/proxy_training_runner_test.cc`. Samplers request
-operations through a framework-created sampling context; only the internal
-DuckDB data-access layer constructs SQL.
+initial sampling, direct labeling, training-data construction, training,
+recursive uncertainty sampling, and retraining. It returns the final
+`ProxyModel` directly. The SemBench-backed end-to-end test is in
+`tests/proxy_training_runner_test.cc`. Samplers request operations through a
+framework-created sampling context; only the internal DuckDB data-access layer
+constructs SQL.
 
 The transport-neutral execution backend and shard-worker protocol are internal
 implementation details. `ProxyTrainingRunner` uses the single-machine backend
@@ -98,17 +113,20 @@ remains pending.
 
 ## Not yet supported
 
-The centralized clean-label strategies are supported: random one-shot
-(`offset`), random recursive (`recursive`), centralized cluster
-representatives (`cluster_central_sample` / GC1), and its recursive form
-(`gc1rec`).
+Direct-label builders support random one-shot (`offset`), random recursive
+(`recursive`), centralized cluster representatives (`cluster_central_sample` /
+GC1), and its recursive form (`gc1rec`).
+
+`ClusterPropagationTrainingDataBuilder` implements centralized propagation
+(GC2/gc2rec behavior) when paired with `ClusterSampler`. It labels only the
+selected representatives through `ILabeler`, then uses their per-cluster
+majority labels to build the full pseudo-labeled training set. It does not
+write pseudo-labels back to DuckDB. In recursive runs, only direct labels are
+excluded from later uncertainty selection, so a pseudo-labeled row may still
+be selected for a ground-truth correction.
 
 The remaining strategies are intentionally not implemented yet:
 
-- `cluster_central` (GC2) and `gc2rec` need a label-amplification policy that
-  propagates a representative's label to its cluster members. This is a
-  separate responsibility from sampling and should be introduced as its own
-  extension point.
 - `cluster_local`, `cluster_local_full`, `federated_sample`, `federated`, and
   `lc1rec` through `lc4rec` require multiple real shards. They depend on
   worker dispatch/RPC, shard-local data ownership, and—in federated modes—
@@ -120,7 +138,8 @@ are pooled for central training, and the resulting model is broadcast after
 each round. It is not a networked distributed runtime.
 
 For this MVP, the configured DuckDB table must provide a `VARCHAR` ID column,
-a `VARCHAR` text column, and a `FLOAT[]` embedding column. `FunctionLabeler`
+a `VARCHAR` text column, and a fixed-width `FLOAT[dimensions]` embedding
+column. `FunctionLabeler`
 is the included callback-backed labeler for tests or existing labeling systems.
 
 Build dependencies are DuckDB, mlpack, Armadillo, cereal, and ensmallen. Once

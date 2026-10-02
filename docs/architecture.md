@@ -9,17 +9,18 @@ classDiagram
 
     class RunConfig {
         +execution_mode
-        +label_mode
         +training_placement
         +dataset
         +rounds
         +label_budget
         +initial_label_fraction
+        +uncertainty_center_1
+        +uncertainty_center_2
         +seed
     }
 
     class ProxyTrainingRunner {
-        +Run(config, sampler, labeler) ProxyModel
+        +Run(config, sampler, labeler, builder) ProxyModel
     }
 
     class ISampler {
@@ -30,6 +31,11 @@ classDiagram
     class ILabeler {
         <<interface>>
         +Label(candidates)
+    }
+
+    class ITrainingDataBuilder {
+        <<interface>>
+        +Build(direct_labels, candidate_pool, assignments)
     }
 
     class ITrainingExecutionBackend {
@@ -78,6 +84,7 @@ classDiagram
     ProxyTrainingRunner --> RunConfig : reads
     ProxyTrainingRunner --> ISampler : initial sampling
     ProxyTrainingRunner --> ILabeler : labels through worker
+    ProxyTrainingRunner --> ITrainingDataBuilder : builds training data through worker
     ProxyTrainingRunner --> ITrainingExecutionBackend : dispatches rounds
     ProxyTrainingRunner --> LogisticRegressionTrainer : central training
     ProxyTrainingRunner --> ProxyModel : returns and scores
@@ -87,6 +94,7 @@ classDiagram
     InProcessMultiShardBackend ..|> ITrainingExecutionBackend
     InProcessMultiShardBackend --> DuckDbShardWorker : direct calls to many workers
     DuckDbShardWorker --> DuckDB : reads and tracks IDs
+    DuckDbShardWorker --> ITrainingDataBuilder : direct labels -> training examples
 
     DistributedBackend ..|> ITrainingExecutionBackend
     DistributedBackend ..> DuckDbShardWorker : future remote dispatch
@@ -101,6 +109,7 @@ backend that sends the same requests to multiple remote shard workers.
 
 `InProcessMultiShardBackend` is the transport-independent correctness harness:
 it runs multiple independent DuckDB shards in one process, divides every
-global label budget across them, pools clean labels centrally, and broadcasts
-the model after every round. This implements and tests LC1 behavior without
-selecting a network communication framework.
+global label budget across them, builds a training dataset per shard, pools
+those datasets centrally, and broadcasts the model after every round. With the
+direct-label builder this implements and tests LC1 behavior without selecting
+a network communication framework.

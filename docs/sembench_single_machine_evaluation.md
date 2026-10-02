@@ -24,6 +24,7 @@ flowchart LR
 | `rounds` | positive integer | Sets the total number of label-and-train rounds. It exists to switch between one-shot training (`1`) and recursive uncertainty sampling (`>1`). |
 | `label_budget` | positive integer | Sets the total number of oracle labels available across all rounds. It exists to compare proxy quality under a fixed labeling cost. |
 | `initial_label_fraction` | number in `(0, 1]` | Allocates the fraction of the total budget used before the first model is trained. It exists to control the coverage-versus-active-learning tradeoff in recursive runs. |
+| `uncertainty_center_1`, `uncertainty_center_2` | finite numbers in `[0, 1]` | Define the recursive selection targets. Each unlabeled row is ranked by `min(abs(score - center_1), abs(score - center_2))`; lower is selected first. Both default to `0.5`, reproducing the original closest-to-0.5 policy. |
 
 ## Extensible components
 
@@ -96,7 +97,7 @@ Cluster sampling runs k-means over all embeddings, partitions similar rows into 
 
 **Legend**
 
-- **Embedding load:** read every row ID and DuckDB `FLOAT[]` embedding, then convert embeddings into cached C++ float vectors.
+- **Embedding load:** read every row ID and DuckDB `FLOAT[1024]` embedding, then retain DuckDB result chunks while cached candidates borrow their contiguous float buffers.
 - Random one-round sampling has no corresponding full-table load because it fetches embeddings only for its selected rows; recursive random runs incur the full load under **Recursive candidate preparation**.
 - **K-means + reps:** copy cached embeddings into the mlpack matrix, run k-means, and choose the row nearest each centroid.
 - **Initial fetch:** retrieve the selected representatives' text for labeling.
