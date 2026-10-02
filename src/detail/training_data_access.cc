@@ -25,29 +25,22 @@ std::uint64_t ElapsedUs(const Clock::time_point& start) {
       std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
 }
 
-void ThrowIfFailed(const duckdb::MaterializedQueryResult& result,
+void ThrowIfFailed(const duckdb::BaseQueryResult& result,
                    std::string_view operation) {
   if (result.HasError()) {
     throw std::runtime_error(std::string(operation) + ": " + result.GetError());
   }
 }
 
+Embedding EmbeddingFromValue(const duckdb::Value& embedding_value);
+
 Candidate CandidateFromResult(duckdb::MaterializedQueryResult& result,
                               duckdb::idx_t row) {
   const duckdb::Value embedding_value = result.GetValue(2, row);
-  if (embedding_value.IsNull()) {
-    throw std::runtime_error("Candidate embedding must not be NULL");
-  }
-
   Candidate candidate;
   candidate.id = result.GetValue(0, row).ToString();
   candidate.text = result.GetValue(1, row).ToString();
-  for (const duckdb::Value& value : duckdb::ListValue::GetChildren(embedding_value)) {
-    if (value.IsNull()) {
-      throw std::runtime_error("Candidate embedding values must not be NULL");
-    }
-    candidate.embedding.push_back(value.GetValue<float>());
-  }
+  candidate.embedding = EmbeddingFromValue(embedding_value);
   return candidate;
 }
 
@@ -55,14 +48,70 @@ Embedding EmbeddingFromValue(const duckdb::Value& embedding_value) {
   if (embedding_value.IsNull()) {
     throw std::runtime_error("Candidate embedding must not be NULL");
   }
-  Embedding embedding;
-  for (const duckdb::Value& value : duckdb::ListValue::GetChildren(embedding_value)) {
+  if (embedding_value.type().id() != duckdb::LogicalTypeId::ARRAY) {
+    throw std::runtime_error("Candidate embedding must be a fixed-width FLOAT array");
+  }
+  std::vector<float> values;
+  values.reserve(duckdb::ArrayValue::GetChildren(embedding_value).size());
+  for (const duckdb::Value& value : duckdb::ArrayValue::GetChildren(embedding_value)) {
     if (value.IsNull()) {
       throw std::runtime_error("Candidate embedding values must not be NULL");
     }
-    embedding.push_back(value.GetValue<float>());
+    values.push_back(value.GetValue<float>());
   }
-  return embedding;
+  return Embedding(std::move(values));
+}
+
+// MaterializedQueryResult::GetValue() creates a DuckDB Value per cell and is
+// explicitly documented by DuckDB as slow for result scans. Read the result in
+// vectorized chunks instead: the fixed-width ARRAY child is a contiguous FLOAT
+// vector, so row i starts at values + i * dimensions without constructing a
+// Value for every dimension.
+void AppendEmbeddingCacheFromChunk(
+    duckdb::DataChunk& chunk,
+    EmbeddingCache& cache) {
+  if (chunk.ColumnCount() != 2) {
+    throw std::runtime_error("Embedding cache query returned an unexpected column count");
+  }
+
+  duckdb::Vector& id_vector = chunk.data[0];
+  duckdb::Vector& embedding_vector = chunk.data[1];
+  if (embedding_vector.GetType().id() != duckdb::LogicalTypeId::ARRAY) {
+    throw std::runtime_error("Embedding cache requires a fixed-width FLOAT array column");
+  }
+  const duckdb::idx_t dimensions = duckdb::ArrayType::GetSize(embedding_vector.GetType());
+  if (dimensions == 0) {
+    throw std::runtime_error("Embedding cache requires a non-empty fixed-width array");
+  }
+  id_vector.Flatten(chunk.size());
+  embedding_vector.Flatten(chunk.size());
+  const auto* ids = duckdb::FlatVector::GetData<duckdb::string_t>(id_vector);
+  duckdb::Vector& values_vector = duckdb::ArrayVector::GetEntry(embedding_vector);
+  const duckdb::idx_t value_count = duckdb::ArrayVector::GetTotalSize(embedding_vector);
+  const duckdb::idx_t required_values = chunk.size() * dimensions;
+  if (value_count < required_values) {
+    throw std::runtime_error("Embedding array child is smaller than its declared dimension");
+  }
+  // The child can have capacity for a full DuckDB vector even when this chunk
+  // is its final partial chunk. Only the active rows are read below.
+  values_vector.Flatten(required_values);
+  const auto* values = duckdb::FlatVector::GetData<float>(values_vector);
+
+  for (duckdb::idx_t row = 0; row < chunk.size(); ++row) {
+    if (duckdb::FlatVector::IsNull(id_vector, row) ||
+        duckdb::FlatVector::IsNull(embedding_vector, row)) {
+      throw std::runtime_error("Candidate ID and embedding must not be NULL");
+    }
+    const duckdb::idx_t offset = row * dimensions;
+    for (duckdb::idx_t index = offset; index < offset + dimensions; ++index) {
+      if (duckdb::FlatVector::IsNull(values_vector, index)) {
+        throw std::runtime_error("Candidate embedding values must not be NULL");
+      }
+    }
+
+    cache.rows.push_back(
+        {ids[row].GetString(), Embedding::Borrow(values + offset, dimensions)});
+  }
 }
 
 std::string CandidateColumns(const TrainingDataset& dataset) {
@@ -110,18 +159,23 @@ void LoadEmbeddingCache(
   const std::string query = "SELECT " + IdAndEmbeddingColumns(dataset) + " FROM " +
       QuoteDuckDbQualifiedIdentifier(dataset.table_name);
   const auto query_start = Clock::now();
-  auto result = connection.Query(query);
+  auto result = connection.SendQuery(query);
   if (timing != nullptr) {
     timing->query_us = ElapsedUs(query_start);
   }
   ThrowIfFailed(*result, "Unable to load embedding cache");
 
   const auto materialization_start = Clock::now();
+  cache.chunks.clear();
   cache.rows.clear();
-  cache.rows.reserve(result->RowCount());
-  for (duckdb::idx_t row = 0; row < result->RowCount(); ++row) {
-    cache.rows.push_back({result->GetValue(0, row).ToString(),
-                          EmbeddingFromValue(result->GetValue(1, row))});
+  // A MaterializedQueryResult's chunk iterator reuses one scan buffer, so
+  // pointers obtained from it cannot be retained. Streaming fetches instead
+  // hand ownership of each DataChunk to this cache. Drain the stream before
+  // returning: later connection queries may invalidate an active stream, but
+  // not the moved, retained chunks.
+  while (auto chunk = result->Fetch()) {
+    AppendEmbeddingCacheFromChunk(*chunk, cache);
+    cache.chunks.push_back(std::move(chunk));
   }
   cache.loaded = true;
   if (timing != nullptr) {
@@ -246,47 +300,6 @@ std::vector<RowId> DuckDbInitialSamplingContext::SelectClusterRepresentativeIds(
   }
   timing_.representative_selection_us = ElapsedUs(representatives_start);
   return representative_ids;
-}
-
-std::vector<LabeledExample> BuildPropagatedExamples(
-    const EmbeddingCache& cache,
-    const ClusterPartition& partition,
-    const std::vector<LabeledExample>& direct_labels) {
-  struct Votes {
-    std::size_t positives = 0;
-    std::size_t negatives = 0;
-  };
-  std::unordered_map<std::size_t, Votes> votes;
-  for (const LabeledExample& direct : direct_labels) {
-    const auto assignment = partition.cluster_for_id.find(direct.candidate.id);
-    if (assignment == partition.cluster_for_id.end()) {
-      continue;
-    }
-    Votes& cluster_votes = votes[assignment->second];
-    if (direct.label == 1) {
-      ++cluster_votes.positives;
-    } else {
-      ++cluster_votes.negatives;
-    }
-  }
-
-  std::vector<LabeledExample> propagated;
-  propagated.reserve(cache.rows.size());
-  for (const CachedEmbedding& row : cache.rows) {
-    const auto assignment = partition.cluster_for_id.find(row.id);
-    if (assignment == partition.cluster_for_id.end()) {
-      continue;
-    }
-    const auto cluster_votes = votes.find(assignment->second);
-    if (cluster_votes == votes.end()) {
-      continue;
-    }
-    // A tie is positive, matching SwanLake's recursive propagation rule.
-    const int pseudo_label =
-        cluster_votes->second.positives >= cluster_votes->second.negatives ? 1 : 0;
-    propagated.push_back({{row.id, {}, row.embedding}, pseudo_label});
-  }
-  return propagated;
 }
 
 void CreateLabeledIdsTable(duckdb::Connection& connection) {

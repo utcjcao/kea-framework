@@ -10,6 +10,7 @@
 #include "detail/proxy_training_helpers.h"
 #include "detail/training_data_access.h"
 #include "kea/proxy_training.h"
+#include "kea/training_data_builder.h"
 
 namespace kea::distributed::detail {
 namespace {
@@ -32,7 +33,7 @@ LabeledExampleBatch LabelAndRecord(
   kea::detail::ValidateLabels(examples, ids);
   kea::detail::RecordLabeledIds(connection, ids);
   LabeledExampleBatch batch;
-  batch.examples = std::move(examples);
+  batch.direct_labels = std::move(examples);
   batch.sampling_us = sampling_us;
   batch.fetching_us = fetching_us;
   return batch;
@@ -60,8 +61,13 @@ DuckDbShardWorker::DuckDbShardWorker(
     ShardId id,
     duckdb::Connection& connection,
     ISampler& sampler,
-    ILabeler& labeler)
-    : connection_(connection), id_(std::move(id)), sampler_(sampler), labeler_(labeler) {
+    ILabeler& labeler,
+    ITrainingDataBuilder& training_data_builder)
+    : connection_(connection),
+      id_(std::move(id)),
+      sampler_(sampler),
+      labeler_(labeler),
+      training_data_builder_(training_data_builder) {
   if (id_.empty()) {
     throw std::invalid_argument("DuckDB shard worker requires a non-empty ID");
   }
@@ -105,16 +111,15 @@ LabeledExampleBatch DuckDbShardWorker::AcquireInitialLabels(
         &timing_.initial_selected_fetch,
         embedding_cache_.loaded ? &embedding_cache_ : nullptr);
     labeled_ids_.insert(ids.begin(), ids.end());
-    direct_labels_ = batch.examples;
-    if (request.label_mode == LabelMode::Propagated) {
+    direct_labels_ = batch.direct_labels;
+    if (training_data_builder_.RequiresClusterAssignments()) {
       cluster_partition_ = sampling_context.TakeClusterPartition();
       if (!cluster_partition_.has_value()) {
         throw std::invalid_argument(
-            "Propagated labels require a sampler that creates a cluster partition");
+            "This training-data builder requires a sampler that creates a cluster partition");
       }
-      batch.propagated_examples = kea::detail::BuildPropagatedExamples(
-          embedding_cache_, *cluster_partition_, direct_labels_);
     }
+    batch.training_examples = BuildTrainingExamples();
     batch.shard_id = Id();
     return batch;
   } catch (...) {
@@ -140,7 +145,8 @@ LabeledExampleBatch DuckDbShardWorker::AcquireUncertainLabels(
   const auto sampling_start = std::chrono::steady_clock::now();
   kea::detail::UncertaintySelectionTiming selection_timing;
   const std::vector<Candidate> selected = kea::detail::SelectMostUncertainCandidates(
-      candidates, request.current_model, request.label_budget, &selection_timing);
+      candidates, request.current_model, request.label_budget,
+      request.uncertainty_center_1, request.uncertainty_center_2, &selection_timing);
   timing_.recursive_scoring_us += selection_timing.scoring_us;
   timing_.recursive_sort_and_copy_us += selection_timing.sorting_and_copying_us;
   std::vector<RowId> ids;
@@ -155,16 +161,29 @@ LabeledExampleBatch DuckDbShardWorker::AcquireUncertainLabels(
   auto batch = LabelAndRecord(
       connection_, labeler_, selected, ids, sampling_us, unlabeled_fetching_us);
   labeled_ids_.insert(ids.begin(), ids.end());
-  direct_labels_.insert(direct_labels_.end(), batch.examples.begin(), batch.examples.end());
-  if (request.label_mode == LabelMode::Propagated) {
-    if (!cluster_partition_.has_value()) {
-      throw std::logic_error("Propagated recursive labels require an initial cluster partition");
-    }
-    batch.propagated_examples = kea::detail::BuildPropagatedExamples(
-        embedding_cache_, *cluster_partition_, direct_labels_);
-  }
+  direct_labels_.insert(
+      direct_labels_.end(), batch.direct_labels.begin(), batch.direct_labels.end());
+  batch.training_examples = BuildTrainingExamples();
   batch.shard_id = Id();
   return batch;
+}
+
+std::vector<LabeledExample> DuckDbShardWorker::BuildTrainingExamples() const {
+  std::vector<Candidate> candidate_pool;
+  const std::vector<Candidate>* candidate_pool_ptr = nullptr;
+  if (training_data_builder_.RequiresCandidatePool()) {
+    candidate_pool.reserve(embedding_cache_.rows.size());
+    for (const kea::detail::CachedEmbedding& row : embedding_cache_.rows) {
+      candidate_pool.push_back({row.id, {}, row.embedding});
+    }
+    candidate_pool_ptr = &candidate_pool;
+  }
+  const std::unordered_map<RowId, std::size_t>* assignments = nullptr;
+  if (cluster_partition_.has_value()) {
+    assignments = &cluster_partition_->cluster_for_id;
+  }
+  return training_data_builder_.Build(
+      {direct_labels_, candidate_pool_ptr, assignments});
 }
 
 LocalModelResult DuckDbShardWorker::TrainLocalModel(const LocalTrainingRequest&) {

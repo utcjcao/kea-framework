@@ -12,17 +12,17 @@ std::vector<LabeledExample> FlattenDirectLabels(
     const std::vector<LabeledExampleBatch>& batches) {
   std::vector<LabeledExample> examples;
   for (const auto& batch : batches) {
-    examples.insert(examples.end(), batch.examples.begin(), batch.examples.end());
+    examples.insert(examples.end(), batch.direct_labels.begin(), batch.direct_labels.end());
   }
   return examples;
 }
 
-std::vector<LabeledExample> FlattenPropagatedTrainingExamples(
+std::vector<LabeledExample> FlattenTrainingExamples(
     const std::vector<LabeledExampleBatch>& batches) {
   std::vector<LabeledExample> examples;
   for (const auto& batch : batches) {
     examples.insert(examples.end(),
-                    batch.propagated_examples.begin(), batch.propagated_examples.end());
+                    batch.training_examples.begin(), batch.training_examples.end());
   }
   return examples;
 }
@@ -76,30 +76,27 @@ ProxyModel RunCentralTraining(
 
   InitialSamplingRequest initial_request;
   initial_request.dataset = config.dataset;
-  initial_request.label_mode = config.label_mode;
   initial_request.label_budget = initial_budget;
   initial_request.seed = config.seed;
 
   const auto initial_acquisition_start = std::chrono::steady_clock::now();
   const std::vector<LabeledExampleBatch> initial_batches =
       backend.AcquireInitialLabels(initial_request);
-  std::vector<LabeledExample> all_direct_labels = FlattenDirectLabels(initial_batches);
+  const std::vector<LabeledExample> initial_direct_labels =
+      FlattenDirectLabels(initial_batches);
   const std::uint64_t initial_acquisition_us = ElapsedUs(initial_acquisition_start);
-  if (all_direct_labels.empty()) {
+  if (initial_direct_labels.empty()) {
     throw std::runtime_error("Initial sampling produced no labeled examples");
   }
-  std::vector<LabeledExample> training_examples =
-      config.label_mode == LabelMode::Clean
-          ? all_direct_labels
-          : FlattenPropagatedTrainingExamples(initial_batches);
+  std::vector<LabeledExample> training_examples = FlattenTrainingExamples(initial_batches);
   if (training_examples.empty()) {
-    throw std::runtime_error("Propagated initial sampling produced no training examples");
+    throw std::runtime_error("Initial sampling produced no training examples");
   }
   const auto initial_training_start = std::chrono::steady_clock::now();
   ProxyModel model = trainer.Train(training_examples);
   const std::uint64_t initial_training_us = ElapsedUs(initial_training_start);
   if (timing != nullptr) {
-    timing->rounds.push_back({0, initial_budget, all_direct_labels.size(),
+    timing->rounds.push_back({0, initial_budget, initial_direct_labels.size(),
                               SumSamplingUs(initial_batches), SumFetchingUs(initial_batches),
                               initial_acquisition_us, initial_training_us});
   }
@@ -111,9 +108,10 @@ ProxyModel RunCentralTraining(
     RecursiveSamplingRequest request;
     request.dataset = config.dataset;
     request.current_model = model;
-    request.label_mode = config.label_mode;
     request.label_budget = budget;
     request.round_index = round;
+    request.uncertainty_center_1 = static_cast<float>(config.uncertainty_center_1);
+    request.uncertainty_center_2 = static_cast<float>(config.uncertainty_center_2);
 
     const auto acquisition_start = std::chrono::steady_clock::now();
     const std::vector<LabeledExampleBatch> batches = backend.AcquireUncertainLabels(request);
@@ -127,12 +125,9 @@ ProxyModel RunCentralTraining(
       }
       break;
     }
-    all_direct_labels.insert(all_direct_labels.end(), labels.begin(), labels.end());
-    training_examples = config.label_mode == LabelMode::Clean
-        ? all_direct_labels
-        : FlattenPropagatedTrainingExamples(batches);
+    training_examples = FlattenTrainingExamples(batches);
     if (training_examples.empty()) {
-      throw std::runtime_error("Propagated recursive sampling produced no training examples");
+      throw std::runtime_error("Recursive sampling produced no training examples");
     }
     const auto training_start = std::chrono::steady_clock::now();
     model = trainer.Train(training_examples);

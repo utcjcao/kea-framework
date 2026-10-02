@@ -290,8 +290,18 @@ std::vector<SemBenchExample> LoadSemBenchExamples(
 void CreateExamplesTable(
     duckdb::Connection& connection,
     const std::vector<SemBenchExample>& examples) {
+  if (examples.empty() || examples.front().candidate.embedding.empty()) {
+    throw std::invalid_argument("SemBench test table requires non-empty embeddings");
+  }
+  const std::size_t dimensions = examples.front().candidate.embedding.size();
+  for (const SemBenchExample& example : examples) {
+    if (example.candidate.embedding.size() != dimensions) {
+      throw std::invalid_argument("SemBench test embeddings must have one fixed dimension");
+    }
+  }
   auto create = connection.Query(
-      "CREATE TABLE examples (id VARCHAR PRIMARY KEY, text VARCHAR NOT NULL, embedding FLOAT[] NOT NULL)");
+      "CREATE TABLE examples (id VARCHAR PRIMARY KEY, text VARCHAR NOT NULL, embedding FLOAT[" +
+      std::to_string(dimensions) + "] NOT NULL)");
   RequireSuccess(*create, "Unable to create SemBench test table");
 
   duckdb::Appender appender(connection, "examples");
@@ -304,7 +314,7 @@ void CreateExamplesTable(
     appender.BeginRow();
     appender.Append(example.candidate.id.c_str());
     appender.Append(example.candidate.text.c_str());
-    appender.Append(duckdb::Value::LIST(duckdb::LogicalType::FLOAT, std::move(values)));
+    appender.Append(duckdb::Value::ARRAY(duckdb::LogicalType::FLOAT, std::move(values)));
     appender.EndRow();
   }
   appender.Close();

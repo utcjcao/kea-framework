@@ -25,6 +25,8 @@ void ValidateLabels(
     const std::vector<Candidate>& candidates,
     const ProxyModel& model,
     std::size_t budget,
+    float uncertainty_center_1,
+    float uncertainty_center_2,
     UncertaintySelectionTiming* timing = nullptr);
 
 }  // namespace kea::detail

@@ -14,11 +14,6 @@ enum class ExecutionMode {
   Distributed,
 };
 
-enum class LabelMode {
-  Clean,
-  Propagated,
-};
-
 enum class TrainingPlacement {
   Central,
   Federated,
@@ -31,13 +26,16 @@ struct WorkerEndpoint {
 
 struct RunConfig {
   ExecutionMode execution_mode = ExecutionMode::SingleMachine;
-  LabelMode label_mode = LabelMode::Clean;
   TrainingPlacement training_placement = TrainingPlacement::Central;
 
   TrainingDataset dataset;
   std::size_t rounds = 1;
   std::size_t label_budget = 200;
   double initial_label_fraction = 0.2;
+  // Recursive rounds label points nearest either of these proxy-confidence
+  // centers. Keeping both at 0.5 preserves the original uncertainty policy.
+  double uncertainty_center_1 = 0.5;
+  double uncertainty_center_2 = 0.5;
   std::uint64_t seed = 42;
 
   std::vector<WorkerEndpoint> workers;

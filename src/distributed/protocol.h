@@ -13,7 +13,6 @@ using ShardId = std::string;
 
 struct InitialSamplingRequest {
   TrainingDataset dataset;
-  LabelMode label_mode = LabelMode::Clean;
   std::size_t label_budget = 0;
   std::uint64_t seed = 42;
 };
@@ -21,9 +20,10 @@ struct InitialSamplingRequest {
 struct RecursiveSamplingRequest {
   TrainingDataset dataset;
   ProxyModel current_model;
-  LabelMode label_mode = LabelMode::Clean;
   std::size_t label_budget = 0;
   std::size_t round_index = 0;
+  float uncertainty_center_1 = 0.5F;
+  float uncertainty_center_2 = 0.5F;
 };
 
 struct LocalTrainingRequest {
@@ -35,10 +35,11 @@ struct LabeledExampleBatch {
   ShardId shard_id;
   // Direct oracle/LLM labels. These, not propagated examples, consume the
   // configured label budget and are retained across recursive rounds.
-  std::vector<LabeledExample> examples;
-  // Current shard-local pseudo-labeled training set when label_mode is
-  // Propagated. Empty for clean-label runs.
-  std::vector<LabeledExample> propagated_examples;
+  std::vector<LabeledExample> direct_labels;
+  // Current shard-local training set after the configured training-data
+  // builder has transformed the accumulated direct labels. It may contain
+  // only direct labels or also pseudo-labeled rows.
+  std::vector<LabeledExample> training_examples;
   std::uint64_t sampling_us = 0;
   std::uint64_t fetching_us = 0;
 };

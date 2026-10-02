@@ -14,6 +14,7 @@ class Connection;
 namespace kea {
 class ILabeler;
 class ISampler;
+class ITrainingDataBuilder;
 }  // namespace kea
 
 namespace kea::distributed::detail {
@@ -31,7 +32,11 @@ struct ShardWorkerTiming {
 class DuckDbShardWorker final : public IShardWorker {
  public:
   DuckDbShardWorker(
-      ShardId id, duckdb::Connection& connection, ISampler& sampler, ILabeler& labeler);
+      ShardId id,
+      duckdb::Connection& connection,
+      ISampler& sampler,
+      ILabeler& labeler,
+      ITrainingDataBuilder& training_data_builder);
   ~DuckDbShardWorker() override;
 
   [[nodiscard]] ShardId Id() const override;
@@ -50,11 +55,14 @@ class DuckDbShardWorker final : public IShardWorker {
   ShardId id_;
   ISampler& sampler_;
   ILabeler& labeler_;
+  ITrainingDataBuilder& training_data_builder_;
   ShardWorkerTiming timing_;
   kea::detail::EmbeddingCache embedding_cache_;
   std::optional<kea::detail::ClusterPartition> cluster_partition_;
   std::vector<LabeledExample> direct_labels_;
   std::unordered_set<RowId> labeled_ids_;
+
+  [[nodiscard]] std::vector<LabeledExample> BuildTrainingExamples() const;
 };
 
 }  // namespace kea::distributed::detail

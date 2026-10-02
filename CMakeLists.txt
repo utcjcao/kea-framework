@@ -32,6 +32,7 @@ add_library(kea_framework
   src/proxy_training_runner.cc
   src/samplers/cluster_sampler.cc
   src/samplers/random_sampler.cc
+  src/training_data_builders.cc
 )
 
 target_compile_features(kea_framework PUBLIC cxx_std_17)
@@ -83,6 +84,13 @@ if(KEA_FRAMEWORK_BUILD_TESTS)
   target_include_directories(distributed_foundation_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME distributed_foundation_test
            COMMAND distributed_foundation_test)
+
+  add_executable(training_data_builder_test
+    tests/training_data_builder_test.cc
+  )
+  target_link_libraries(training_data_builder_test PRIVATE kea_framework)
+  add_test(NAME training_data_builder_test
+           COMMAND training_data_builder_test)
 
   if(KEA_FRAMEWORK_BUILD_SEMBENCH_E2E_TESTS AND EXISTS "${KEA_SEMBENCH_DIR}")
     find_package(ZLIB REQUIRED)

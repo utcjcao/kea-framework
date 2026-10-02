@@ -8,6 +8,7 @@
 #include "distributed/execution_backend.h"
 #include "distributed/training_execution.h"
 #include "kea/run_config.h"
+#include "kea/training_data_builder.h"
 
 namespace kea {
 ProxyTrainingRunner::ProxyTrainingRunner(duckdb::Connection& connection)
@@ -16,13 +17,14 @@ ProxyTrainingRunner::ProxyTrainingRunner(duckdb::Connection& connection)
 ProxyModel ProxyTrainingRunner::Run(
     const RunConfig& config,
     ISampler& sampler,
-    ILabeler& labeler) {
+    ILabeler& labeler,
+    ITrainingDataBuilder& training_data_builder) {
   if (config.execution_mode != ExecutionMode::SingleMachine) {
     throw std::logic_error(
         "Distributed execution is not connected to ProxyTrainingRunner yet");
   }
   auto worker = std::make_shared<distributed::detail::DuckDbShardWorker>(
-      "local", connection_, sampler, labeler);
+      "local", connection_, sampler, labeler, training_data_builder);
   distributed::SingleMachineBackend backend(worker);
   return distributed::detail::RunCentralTraining(config, backend, trainer_);
 }

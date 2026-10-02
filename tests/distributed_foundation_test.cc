@@ -1,9 +1,11 @@
 #include "distributed/duckdb_shard_worker.h"
 #include "distributed/execution_backend.h"
 #include "distributed/training_execution.h"
+#include "detail/proxy_training_helpers.h"
 #include "kea/function_labeler.h"
 #include "kea/run_config.h"
 #include "kea/samplers/cluster_sampler.h"
+#include "kea/training_data_builder.h"
 
 #include <cassert>
 #include <cmath>
@@ -64,6 +66,31 @@ bool ThrowsInvalidConfig(const kea::RunConfig& config) {
   return false;
 }
 
+void TestUncertaintyCenters() {
+  const kea::ProxyModel model{{1.0F}, 0.0F};
+  const std::vector<kea::Candidate> candidates = {
+      {"middle", "", {0.0F}},
+      {"near-low", "", {-1.3862944F}},
+      {"near-high", "", {1.3862944F}},
+  };
+
+  const std::vector<kea::Candidate> legacy_selection =
+      kea::detail::SelectMostUncertainCandidates(
+          candidates, model, /*budget=*/1, /*center_1=*/0.5F, /*center_2=*/0.5F);
+  assert(legacy_selection.size() == 1);
+  assert(legacy_selection[0].id == "middle");
+
+  const std::vector<kea::Candidate> two_center_selection =
+      kea::detail::SelectMostUncertainCandidates(
+          candidates, model, /*budget=*/2, /*center_1=*/0.2F, /*center_2=*/0.8F);
+  assert(two_center_selection.size() == 2);
+  assert(two_center_selection[0].id == "near-high" ||
+         two_center_selection[0].id == "near-low");
+  assert(two_center_selection[1].id == "near-high" ||
+         two_center_selection[1].id == "near-low");
+  assert(two_center_selection[0].id != two_center_selection[1].id);
+}
+
 #if defined(KEA_HAS_SEMBENCH)
 
 void RunSemBenchDistributedFlow() {
@@ -101,10 +128,11 @@ void RunSemBenchDistributedFlow() {
   options.cluster_count = 12;
   options.max_iterations = 5;
   kea::ClusterSampler sampler(options);
+  kea::DirectLabelTrainingDataBuilder training_data_builder;
   auto shard_a_worker = std::make_shared<kea::distributed::detail::DuckDbShardWorker>(
-      "shard-a", shard_a_connection, sampler, labeler);
+      "shard-a", shard_a_connection, sampler, labeler, training_data_builder);
   auto shard_b_worker = std::make_shared<kea::distributed::detail::DuckDbShardWorker>(
-      "shard-b", shard_b_connection, sampler, labeler);
+      "shard-b", shard_b_connection, sampler, labeler, training_data_builder);
   kea::distributed::InProcessMultiShardBackend multi_backend(
       {shard_a_worker, shard_b_worker});
 
@@ -139,6 +167,14 @@ int main() {
   distributed_config.workers = {{"worker-a", "in-process://a"}, {"worker-b", "in-process://b"}};
   kea::ValidateRunConfig(distributed_config);
 
+  kea::RunConfig invalid_center_config = distributed_config;
+  invalid_center_config.uncertainty_center_1 = -0.1;
+  assert(ThrowsInvalidConfig(invalid_center_config));
+  invalid_center_config = distributed_config;
+  invalid_center_config.uncertainty_center_2 = 1.1;
+  assert(ThrowsInvalidConfig(invalid_center_config));
+  TestUncertaintyCenters();
+
   kea::RunConfig invalid_config = distributed_config;
   invalid_config.execution_mode = kea::ExecutionMode::SingleMachine;
   assert(ThrowsInvalidConfig(invalid_config));
@@ -150,7 +186,7 @@ int main() {
   initial.dataset.table_name = "documents";
   const auto labeled = backend.AcquireInitialLabels(initial);
   assert(labeled.size() == 1);
-  assert(labeled[0].examples.size() == 1);
+  assert(labeled[0].direct_labels.size() == 1);
 
   kea::distributed::ModelBroadcast broadcast{{{2.0F}, -1.0F}, 1};
   backend.BroadcastModel(broadcast);
@@ -160,7 +196,7 @@ int main() {
   recursive.current_model = broadcast.model;
   const auto uncertain = backend.AcquireUncertainLabels(recursive);
   assert(uncertain.size() == 1);
-  assert(uncertain[0].examples[0].candidate.id == "worker-a-uncertain");
+  assert(uncertain[0].direct_labels[0].candidate.id == "worker-a-uncertain");
 
   const auto models = backend.TrainLocalModels({});
   assert(models.size() == 1);

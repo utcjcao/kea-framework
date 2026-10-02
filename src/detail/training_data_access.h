@@ -7,11 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "duckdb.hpp"
 #include "kea/proxy_training.h"
-
-namespace duckdb {
-class Connection;
-}  // namespace duckdb
 
 namespace kea::detail {
 
@@ -31,15 +28,17 @@ struct InitialSamplingTiming {
   std::uint64_t representative_selection_us = 0;
 };
 
-// Per-run cache: the operations that train and score a proxy require an ID
-// and embedding, while text is only needed for the small batch sent to a
-// labeler. It is intentionally internal to the DuckDB worker.
+// Per-run cache: each retained DataChunk owns the DuckDB fixed-width ARRAY
+// child buffer backing the embedding views below. Keep these chunks alive for
+// the entire worker run; resetting the cache invalidates every borrowed
+// embedding. Text is still fetched only for the small label batch.
 struct CachedEmbedding {
   RowId id;
   Embedding embedding;
 };
 
 struct EmbeddingCache {
+  std::vector<std::unique_ptr<duckdb::DataChunk>> chunks;
   std::vector<CachedEmbedding> rows;
   bool loaded = false;
 };
@@ -88,14 +87,6 @@ class DuckDbInitialSamplingContext final : public IInitialSamplingContext {
   InitialSamplingTiming timing_;
   std::optional<ClusterPartition> cluster_partition_;
 };
-
-// Expands accumulated direct labels over a cluster partition for training.
-// Each covered cluster receives its direct-label majority; ties are positive.
-// Clusters without a direct label are omitted. This does not mutate DuckDB.
-[[nodiscard]] std::vector<LabeledExample> BuildPropagatedExamples(
-    const EmbeddingCache& cache,
-    const ClusterPartition& partition,
-    const std::vector<LabeledExample>& direct_labels);
 
 void CreateLabeledIdsTable(duckdb::Connection& connection);
 void DropLabeledIdsTable(duckdb::Connection& connection);

@@ -16,6 +16,7 @@
 #include "kea/run_config.h"
 #include "kea/samplers/cluster_sampler.h"
 #include "kea/samplers/random_sampler.h"
+#include "kea/training_data_builder.h"
 
 namespace {
 
@@ -43,6 +44,7 @@ void RunEndToEndCase(
     return labels.at(candidate.id);
   });
   kea::RandomSampler sampler;
+  kea::DirectLabelTrainingDataBuilder training_data_builder;
   kea::ProxyTrainingRunner runner(connection);
   kea::RunConfig config;
   config.dataset.table_name = "examples";
@@ -51,7 +53,8 @@ void RunEndToEndCase(
   config.initial_label_fraction = 0.5;
   config.seed = 42;
 
-  const kea::ProxyModel model = runner.Run(config, sampler, oracle);
+  const kea::ProxyModel model = runner.Run(
+      config, sampler, oracle, training_data_builder);
   assert(labeled_ids.size() == label_budget);
   assert(std::unordered_set<kea::RowId>(labeled_ids.begin(), labeled_ids.end()).size() == label_budget);
   assert(model.weights.size() == 1024);
@@ -84,13 +87,14 @@ void RunPropagatedEndToEndCase(const kea::test::SemBenchDatasetPaths& dataset) {
   kea::ProxyTrainingRunner runner(connection);
   kea::RunConfig config;
   config.dataset.table_name = "examples";
-  config.label_mode = kea::LabelMode::Propagated;
   config.rounds = 2;
   config.label_budget = 32;
   config.initial_label_fraction = 0.5;
   config.seed = 42;
+  kea::ClusterPropagationTrainingDataBuilder training_data_builder;
 
-  const kea::ProxyModel model = runner.Run(config, sampler, oracle);
+  const kea::ProxyModel model = runner.Run(
+      config, sampler, oracle, training_data_builder);
   // The pseudo-labeled expansion must not create additional labeler calls.
   assert(labeled_ids.size() == config.label_budget);
   assert(std::unordered_set<kea::RowId>(labeled_ids.begin(), labeled_ids.end()).size() ==

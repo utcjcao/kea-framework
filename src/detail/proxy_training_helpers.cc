@@ -42,6 +42,8 @@ std::vector<Candidate> SelectMostUncertainCandidates(
     const std::vector<Candidate>& candidates,
     const ProxyModel& model,
     std::size_t budget,
+    float uncertainty_center_1,
+    float uncertainty_center_2,
     UncertaintySelectionTiming* timing) {
   if (timing != nullptr) {
     *timing = {};
@@ -51,7 +53,10 @@ std::vector<Candidate> SelectMostUncertainCandidates(
   scores.reserve(candidates.size());
   for (std::size_t index = 0; index < candidates.size(); ++index) {
     const Candidate& candidate = candidates[index];
-    const float uncertainty = std::abs(model.PredictProbability(candidate.embedding) - 0.5F);
+    const float score = model.PredictProbability(candidate.embedding);
+    const float uncertainty = std::min(
+        std::abs(score - uncertainty_center_1),
+        std::abs(score - uncertainty_center_2));
     scores.emplace_back(uncertainty, index);
   }
   if (timing != nullptr) {

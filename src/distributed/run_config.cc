@@ -1,5 +1,6 @@
 #include "kea/run_config.h"
 
+#include <cmath>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -14,6 +15,14 @@ void ValidateRunConfig(const RunConfig& config) {
   }
   if (config.initial_label_fraction <= 0.0 || config.initial_label_fraction > 1.0) {
     throw std::invalid_argument("RunConfig initial_label_fraction must be in (0, 1]");
+  }
+  const auto valid_center = [](double center) {
+    return std::isfinite(center) && center >= 0.0 && center <= 1.0;
+  };
+  if (!valid_center(config.uncertainty_center_1) ||
+      !valid_center(config.uncertainty_center_2)) {
+    throw std::invalid_argument(
+        "RunConfig uncertainty centers must be finite values in [0, 1]");
   }
 
   const bool distributed = config.execution_mode == ExecutionMode::Distributed;
